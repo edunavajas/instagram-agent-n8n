@@ -365,12 +365,6 @@ function summaryMessage(counts) {
     return shown.length ? ['', `<b>${title}</b>`, ...shown.map(([label, value]) => `${label}: ${value}`)] : [];
   };
   const expired = n('expired_approvals') + n('expired_windows');
-  const blocked = n('blocked_injection') + n('blocked_sensitive') + n('blocked_loop');
-  const blockedDetail = [
-    n('blocked_injection') ? `${n('blocked_injection')} inyección` : '',
-    n('blocked_sensitive') ? `${n('blocked_sensitive')} sensibles` : '',
-    n('blocked_loop') ? `${n('blocked_loop')} bucle` : '',
-  ].filter(Boolean).join(', ');
   const expiredDetail = [
     n('expired_approvals') ? `${n('expired_approvals')} aprobaciones` : '',
     n('expired_windows') ? `${n('expired_windows')} ventanas de 24 h` : '',
@@ -391,7 +385,13 @@ function summaryMessage(counts) {
     ]),
     ...section('Sin enviar', [
       [`Vencidos${expiredDetail ? ` (${expiredDetail})` : ''}`, expired],
-      [`Bloqueados${blockedDetail ? ` (${blockedDetail})` : ''}`, blocked],
+    ]),
+    // Motivos por separado y sin sumar: un DM puede ser sensible y además quedar
+    // retenido por el freno, y muchos acaban aprobados y enviados por ti.
+    ...section('No salieron solos (motivo)', [
+      ['Intento de inyección', n('blocked_injection')],
+      ['Tema sensible', n('blocked_sensitive')],
+      ['Freno anti-bucles', n('blocked_loop')],
     ]),
     ...section('Problemas', [
       ['Con error (míralos)', n('errors'), true],

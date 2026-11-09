@@ -1,7 +1,6 @@
 # FAQ de Instagram — Taller Norte
 
-Documento de ejemplo para indexar con el flujo 04 del episodio 2 (o el MCP), junto a la FAQ de soporte del episodio 3.
-Se indexa con `replace_all: false`: no borra la otra FAQ. Todo lo que pone aquí es inventado.
+Documento de ejemplo de Taller Norte, complemento de la FAQ de soporte. Todo lo que pone aquí es inventado.
 
 ## Horario de atención por mensaje directo
 

@@ -1,7 +1,7 @@
 # Spike: firma de los webhooks de Meta en n8n 2.10.2
 
 Fecha: 2026-11-09. Servidor del episodio (n8n 2.10.2, task runners externos `n8nio/runners:2.10.2`, Coolify).
-Se probó con un flujo temporal «ZZ spike firma» publicado en `https://n8n.devknives.tech/webhook/zz-spike-firma`
+Se probó con un flujo temporal «ZZ spike firma» publicado en `https://n8n.tudominio.com/webhook/zz-spike-firma`
 y peticiones `curl` firmadas con `openssl` desde otra máquina, por HTTPS público. El flujo y sus
 ejecuciones se borraron al terminar. Secreto: uno de PRUEBA inventado (no el de Meta).
 
@@ -137,6 +137,8 @@ responde 200 (no probado qué código exacto devuelve n8n; Meta reintenta, que e
 El JSON ya parseado para `events.js` está en `$('Webhook Instagram').first().json.body`.
 
 ## 4. Configuración del servidor (Coolify, servicio n8n)
+
+Los scripts `ep4-*` que se nombran aquí son del servidor de la serie (repositorio privado de operaciones); no están en este repo.
 
 1. **File Mount** `/etc/n8n-task-runners.json` del contenedor `task-runners` = `runners/n8n-task-runners.json` de este repo.
    Es el del ep3 más tres cosas en el runner **de Python** (nada cambia en el de JavaScript):

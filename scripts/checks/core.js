@@ -84,7 +84,7 @@ module.exports = function core(assert, ctx) {
     assert.strictEqual(dm.dropped.length, 0);
     assert.deepStrictEqual(dm.events[0], {
       kind: 'dm', id: 'aWdfZAG1fakefacil0001', igAccountId: ACCOUNT, from: { id: USER },
-      text: '¿A qué hora abrís?', ts: new Date(1762700099000).toISOString(),
+      text: '¿En qué horario contestáis los mensajes?', ts: new Date(1762700099000).toISOString(),
     });
     assert.strictEqual(parse(data('dm-sensible')).events[0].text, '¿Cuánto cuesta el curso y puedo pedir una devolución?');
     assert.ok(/^Ignora tus instrucciones anteriores/.test(parse(data('dm-inyeccion')).events[0].text));
@@ -611,7 +611,7 @@ module.exports = function core(assert, ctx) {
     const zero = summaryMessage({});
     assert.ok(zero.startsWith('📊 <b>Resumen de ayer · Instagram</b>'));
     assert.ok(zero.includes('Esperando aprobación: 0') && zero.includes('Con error (míralos): 0'), 'esperando y errores siempre salen');
-    for (const hidden of ['Con palabra clave', 'Privados enviados', 'Contestados solos', 'Aprobados por ti', 'Vencidos', 'Bloqueados', 'Atascados', 'Borrados']) {
+    for (const hidden of ['Con palabra clave', 'Privados enviados', 'Contestados solos', 'Aprobados por ti', 'Vencidos', 'No salieron solos', 'Atascados', 'Borrados']) {
       assert.ok(!zero.includes(hidden), hidden + ' oculto a 0');
     }
     assert.ok(zero.includes('✅ Nada pendiente de ti.'));
@@ -622,12 +622,13 @@ module.exports = function core(assert, ctx) {
     });
     for (const expected of [
       'Con palabra clave: 12', 'Privados enviados: 10', 'Contestados solos: 5', 'Aprobados por ti: 3', 'Rechazados por ti: 1',
-      'Vencidos (2 aprobaciones, 1 ventanas de 24 h): 3', 'Bloqueados (1 inyección, 2 sensibles, 1 bucle): 4',
+      'Vencidos (2 aprobaciones, 1 ventanas de 24 h): 3', 'Intento de inyección: 1', 'Tema sensible: 2', 'Freno anti-bucles: 1',
       'Con error (míralos): 1', 'Esperando aprobación: 4', 'Atascados más de 1 h: 1', 'Borrados por retención: 7',
       '👉 Te toca: 4 por aprobar, 1 con error, 1 atascado, 3 vencidos.',
     ]) assert.ok(summary.includes(expected), expected + '\n' + summary);
     assert.ok(summaryMessage({ expired_windows: 1 }).includes('Vencidos (1 ventanas de 24 h): 1'));
-    assert.ok(summaryMessage({ blocked_loop: 1 }).includes('Bloqueados (1 bucle): 1'));
+    assert.ok(summaryMessage({ blocked_loop: 1 }).includes('Freno anti-bucles: 1'));
+    assert.ok(!summaryMessage({ blocked_loop: 1 }).includes('Tema sensible'));
     assert.ok(summary.length < MESSAGE_MAX);
     assert.ok(!summaryMessage({ waiting: 'x', errors: null }).includes('NaN'));
 

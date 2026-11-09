@@ -8,6 +8,9 @@
 # Casos: comentario-palabra, comentario-sin-palabra, comentario-propio, duplicado,
 #        dm-facil, dm-sensible, dm-inyeccion, echo, firma-invalida, rafaga,
 #        verificacion-get
+# Extra (no entran en «todos»): lectura, reaccion, postback, comentario-hijo,
+#        dm-duplicado (mismo mid dos veces, como un reintento de Meta),
+#        dm-vieja (DM de hace 25 h: llega con la ventana cerrada)
 #
 # Lee IG_WEBHOOK_URL, IG_APP_SECRET e IG_VERIFY_TOKEN del entorno o de .env
 # (el entorno gana). Los payloads están en test-data/ (datos inventados).
@@ -27,7 +30,7 @@ DATA="$ROOT/test-data"
 ALL_CASES="verificacion-get comentario-palabra comentario-sin-palabra comentario-propio duplicado dm-facil dm-sensible dm-inyeccion echo firma-invalida rafaga"
 
 usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-2}"
 }
 
@@ -76,10 +79,20 @@ uid() { printf '%s%05d' "$(date +%s)" "$RANDOM"; }
 # Firma del cuerpo EXACTO que se manda (se firma el fichero y se envía ese fichero).
 sign() { openssl dgst -sha256 -hmac "$SECRET" -r "$1" | cut -d' ' -f1; }
 
+# Fechas de los payloads: las de test-data son fijas (nov. 2025) y un DM con más
+# de 24 h llega con la ventana cerrada. Se cambian por «ahora» (o por IG_TS_MS,
+# milisegundos, para probar un DM viejo).
+NOW_MS="${IG_TS_MS:-$(date +%s%3N)}"
+NOW_S="$((NOW_MS / 1000))"
+with_now() {
+  sed -e "s/\b17627001[0-9]\{5\}\b/${NOW_MS}/g" -e "s/\b17627000[0-9]\{5\}\b/${NOW_MS}/g" \
+      -e "s/\b1762700000\b/${NOW_S}/g"
+}
+
 # Copia un fichero de test-data cambiando un texto por otro nuevo. Salida: ruta.
 fresh() {
   local name="$1" from="$2" to="$3" out="$TMP/$1-$RANDOM.json"
-  sed "s/${from}/${to}/g" "$DATA/${name}.json" > "$out"
+  sed "s/${from}/${to}/g" "$DATA/${name}.json" | with_now > "$out"
   printf '%s' "$out"
 }
 
@@ -134,6 +147,25 @@ case_dm() { # <caso> <texto a cambiar>
   local file; file="$(fresh "$1" "$2" "$3$(uid)")"
   record "$1" 200 "$(post_file "$file")"
 }
+case_ignorado() { # <fichero de test-data> <texto a cambiar> <prefijo nuevo> <nota>
+  local file; file="$(fresh "$1" "$2" "$3$(uid)")"
+  record "$1" 200 "$(post_file "$file")" "$4"
+}
+case_dm_duplicado() {
+  local file first second
+  file="$(fresh dm-facil aWdfZAG1fakefacil0001 "aWdfZAG1fakedup$(uid)")"
+  first="$(post_file "$file")"
+  second="$(post_file "$file")"
+  record "dm-duplicado (1.ª vez)" 200 "$first"
+  record "dm-duplicado (2.ª vez, reintento)" 200 "$second" "en ig_messages UNA fila y el modelo una sola vez"
+}
+case_dm_vieja() {
+  local file old_ms
+  old_ms="$(( $(date +%s%3N) - 25 * 3600 * 1000 ))"
+  file="$(fresh dm-facil aWdfZAG1fakefacil0001 "aWdfZAG1fakevieja$(uid)")"
+  sed -i "s/${NOW_MS}/${old_ms}/g" "$file"
+  record dm-vieja 200 "$(post_file "$file")" "ig_messages vencido_ventana, sin Telegram"
+}
 case_echo() {
   local file; file="$(fresh echo aWdfZAG1fakeecho0001 "aWdfZAG1fakeecho$(uid)")"
   record echo 200 "$(post_file "$file")" "se descarta como echo"
@@ -151,7 +183,10 @@ case_rafaga() {
   local base; base="$(uid)"
   local i
   for i in $(seq 1 "$total"); do
-    sed "s/__ID__/18${base}$(printf '%02d' "$i")/g" "$DATA/rafaga.json" > "$dir/in-$i.json"
+    # Un usuario distinto por comentario: con el mismo, 49 de 50 serían duplicado_usuario
+    # (una sola privada por usuario y publicación) y no se probaría el camino completo.
+    sed -e "s/__ID__/18${base}$(printf '%02d' "$i")/g" -e "s/1234567890123456/9${base}$(printf '%02d' "$i")/g" \
+      "$DATA/rafaga.json" | with_now > "$dir/in-$i.json"
   done
   export URL SECRET dir
   start="$(date +%s.%N)"
@@ -160,9 +195,11 @@ case_rafaga() {
   seq 1 "$total" | xargs -P 10 -I{} bash -c '
     file="$dir/in-{}.json"
     sig="sha256=$(openssl dgst -sha256 -hmac "$SECRET" -r "$file" | cut -d" " -f1)"
-    curl -sS -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
+    out="$(curl -sS -o /dev/null -w "%{http_code} %{time_total}" --max-time 30 -X POST \
       -H "Content-Type: application/json" -H "X-Hub-Signature-256: $sig" \
-      --data-binary "@$file" "$URL" > "$dir/code-{}" 2>/dev/null || printf 000 > "$dir/code-{}"
+      --data-binary "@$file" "$URL" 2>/dev/null || printf "000 0")"
+    printf "%s" "${out%% *}" > "$dir/code-{}"
+    printf "%s\n" "${out##* }" > "$dir/time-{}"
   '
   end="$(date +%s.%N)"
   for i in $(seq 1 "$total"); do
@@ -170,7 +207,10 @@ case_rafaga() {
     [ "$code" = "200" ] && ok=$((ok + 1))
   done
   secs="$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.2f", b - a }')"
-  record "rafaga (${total} comentarios, 10 en paralelo)" "${total}x200" "${ok}x200" "${secs} s en total; en ig_comments deben quedar ${total} filas y ninguna repetida"
+  # Tiempo de respuesta de cada petición (lo que espera Meta): p50 y máximo.
+  local times
+  times="$(cat "$dir"/time-* 2>/dev/null | sort -n | awk '{ v[NR] = $1 } END { if (NR) printf "p50 %.2f s, máx. %.2f s", v[int((NR + 1) / 2)], v[NR] }')"
+  record "rafaga (${total} comentarios, 10 en paralelo)" "${total}x200" "${ok}x200" "${secs} s en total; ${times}; en ig_comments deben quedar ${total} filas y ninguna repetida"
 }
 case_verificacion_get() {
   if is_placeholder "$VERIFY_TOKEN"; then
@@ -212,6 +252,12 @@ run_case() {
     firma-invalida) need_secret; case_firma_invalida ;;
     rafaga) need_secret; case_rafaga ;;
     verificacion-get) case_verificacion_get ;;
+    lectura) need_secret; case_ignorado lectura aWdfZAG1fakeecho0001 aWdfZAG1fakeread "se descarta como read" ;;
+    reaccion) need_secret; case_ignorado reaccion aWdfZAG1fakeecho0001 aWdfZAG1fakereact "se descarta como reaction" ;;
+    postback) need_secret; case_ignorado postback aWdfZAG1fakepostback0001 aWdfZAG1fakepb "se descarta como postback" ;;
+    comentario-hijo) need_secret; case_ignorado comentario-respuesta-hijo 18000000000000005 18 "se descarta como reply_to_reply" ;;
+    dm-duplicado) need_secret; case_dm_duplicado ;;
+    dm-vieja) need_secret; case_dm_vieja ;;
     *) echo "Caso desconocido: $1" >&2; usage ;;
   esac
 }

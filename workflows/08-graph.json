@@ -1,0 +1,506 @@
+{
+  "name": "IG 08 - Graph API",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "### IG 08 Graph API\n\n**Único sitio que habla con Meta.** Webhook interno `/webhook/ig-graph` con `{op, ...}`:\n`public_reply` (comment_id, text) · `private_reply` (comment_id, text) · `send_dm` (igsid, text) · `get_profile` (igsid, solo diagnóstico).\n\n`dry_run` de **este** nodo `Configuración` manda: mientras no sea exactamente `false`, no se llama a Meta; se apunta en `ig_graph_log` lo que se habría enviado y se devuelve un id falso (`dry_...`).\nCon `false`: `{graph_base}/{graph_version}/...` con la credencial **Instagram Token**. Los errores de Meta se clasifican (`retryable`, `kind`, `code`, `subcode`).\n\nResponde con el resultado: `{ok, id, recipient_id, message_id, retryable, kind, code, subcode, message, dry_run}`. El token nunca se guarda.",
+        "height": 330,
+        "width": 700,
+        "color": 5
+      },
+      "id": "b39286c6-abfd-59b8-ba02-9bf1ad78601e",
+      "name": "Notas Graph",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        80,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ig-graph",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "7ab20aaf-7bcd-56f2-97ef-27dcf950e8f8",
+      "name": "Webhook Graph",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        220,
+        400
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "POST /webhook/ig-graph (cabecera X-IG-API-Key). Responde con el resultado del último nodo.",
+      "webhookId": "52fb2230-9e25-5d5d-a984-da9f562f10d3"
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "3def2fc8-c209-5933-990c-461cc618f0e6",
+              "name": "dry_run",
+              "value": "true",
+              "type": "string"
+            },
+            {
+              "id": "b446a004-da33-5b76-a40e-3f9363bcafef",
+              "name": "graph_base",
+              "value": "https://graph.facebook.com",
+              "type": "string"
+            },
+            {
+              "id": "3902e048-e23f-54e6-9438-4f56762368e1",
+              "name": "graph_version",
+              "value": "v27.0",
+              "type": "string"
+            },
+            {
+              "id": "d144bd2a-8dca-5487-b3a3-077a19ca1c73",
+              "name": "ig_account_id",
+              "value": "cambia-esto",
+              "type": "string"
+            },
+            {
+              "id": "c4d14efa-84a8-54d4-913c-f742a9949630",
+              "name": "telegram_chat_id",
+              "value": "cambia-esto",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "73b5a6eb-2f52-59b3-ae51-b4b0657265ac",
+      "name": "Configuración",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        460,
+        400
+      ],
+      "notes": "Valores que se ven en cámara. El .env no entra aquí: Coolify bloquea $env. Los secretos NO van aquí."
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Todo lo que sabe el agente de la Graph API de Meta, sin llamarla: construir la\n// petición (sin token: lo pone la credencial de n8n), clasificar los errores,\n// responder en DRY_RUN, recortar a 1000 bytes y calcular reintentos y ventanas.\n// Fuente de los códigos: notas de la documentación oficial (errores de Messenger\n// e Instagram Messaging). El único flujo que habla con Meta es «IG 08 - Graph API».\n\nconst GRAPH_DM_MAX_BYTES = 1000;\nconst GRAPH_BACKOFF_MINUTES = [1, 2, 5, 15, 60, 240];\nconst GRAPH_OPS = ['public_reply', 'private_reply', 'send_dm', 'get_profile'];\n\nfunction grPick(args, camel, snake) {\n  if (!args) return '';\n  const value = args[camel] !== undefined ? args[camel] : args[snake];\n  return value === undefined || value === null ? '' : String(value).trim();\n}\n\nfunction grNeed(op, name, value) {\n  if (!value) throw new Error(`graph.${op}: falta ${name}`);\n  return value;\n}\n\nfunction utf8Bytes(text) {\n  let total = 0;\n  for (const char of String(text === undefined || text === null ? '' : text)) {\n    const code = char.codePointAt(0);\n    total += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n  }\n  return total;\n}\n\n// Recorta a maxBytes bytes UTF-8 sin partir un carácter (ñ = 2 bytes, emoji = 4).\n// Tampoco deja colgando un unión de emojis (ZWJ) ni un selector de variante.\nfunction truncateUtf8(text, maxBytes) {\n  const limit = Math.max(0, Math.trunc(Number(maxBytes)) || 0);\n  let total = 0;\n  let out = '';\n  for (const char of String(text === undefined || text === null ? '' : text)) {\n    const code = char.codePointAt(0);\n    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n    if (total + size > limit) {\n      return out.replace(/[‍️]+$/, '');\n    }\n    total += size;\n    out += char;\n  }\n  return out;\n}\n\n// buildRequest('public_reply', { commentId, text }, cfg) -> { method, url, body, path }\n// cfg = el nodo Configuración del flujo 08: graph_base, graph_version, ig_account_id\n// (también se aceptan graphBase, graphVersion, igAccountId). path va sin host: es lo\n// que se guarda en ig_graph_log.\nfunction buildRequest(op, args, cfg) {\n  const config = cfg || {};\n  const base = String(config.graph_base || config.graphBase || 'https://graph.facebook.com').replace(/\\/+$/, '');\n  const version = String(config.graph_version || config.graphVersion || 'v27.0').replace(/^\\/+|\\/+$/g, '');\n  const account = String(config.ig_account_id || config.igAccountId || '').trim();\n  const make = (method, path, body) => ({ method, path: `/${version}/${path}`, url: `${base}/${version}/${path}`, body });\n  const enc = encodeURIComponent;\n  if (op === 'public_reply') {\n    const commentId = grNeed(op, 'commentId', grPick(args, 'commentId', 'comment_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(commentId)}/replies`, { message: text });\n  }\n  if (op === 'private_reply') {\n    const commentId = grNeed(op, 'commentId', grPick(args, 'commentId', 'comment_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(grNeed(op, 'ig_account_id', account))}/messages`, {\n      recipient: { comment_id: commentId },\n      message: { text: truncateUtf8(text, GRAPH_DM_MAX_BYTES) },\n    });\n  }\n  if (op === 'send_dm') {\n    const igsid = grNeed(op, 'igsid', grPick(args, 'igsid', 'recipient_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(grNeed(op, 'ig_account_id', account))}/messages`, {\n      recipient: { id: igsid },\n      message: { text: truncateUtf8(text, GRAPH_DM_MAX_BYTES) },\n    });\n  }\n  if (op === 'get_profile') {\n    const igsid = grNeed(op, 'igsid', grPick(args, 'igsid', 'recipient_id'));\n    const fields = grPick(args, 'fields', 'fields') || 'name,username';\n    return make('GET', `${enc(igsid)}?fields=${enc(fields).replace(/%2C/gi, ',')}`, null);\n  }\n  throw new Error(`graph: operación desconocida (${String(op)})`);\n}\n\nfunction grParse(body) {\n  if (typeof body === 'string') {\n    try { return JSON.parse(body); } catch { return { error: { message: body.slice(0, 300) } }; }\n  }\n  return body;\n}\n\n// Tabla de errores: código y subcódigo de Meta -> qué hacer.\n//   retryable = se puede volver a intentar más tarde (cola con backoff)\n//   kind      rate_limit | window_closed | invalid_comment | permission | token |\n//             not_found | blocked | transient | unknown\nfunction classifyError(httpStatus, body) {\n  const parsed = grParse(body);\n  const error = parsed && typeof parsed === 'object' && parsed.error !== undefined ? parsed.error : parsed;\n  const detail = error && typeof error === 'object' ? error : {};\n  const code = Number.isFinite(Number(detail.code)) && detail.code !== null && detail.code !== '' ? Number(detail.code) : null;\n  const subcode = Number.isFinite(Number(detail.error_subcode)) && detail.error_subcode !== null && detail.error_subcode !== '' ? Number(detail.error_subcode) : null;\n  const status = Number(httpStatus) || 0;\n  let message = '';\n  if (typeof error === 'string') message = error;\n  else if (detail.message) message = String(detail.message);\n  message = message.replace(/\\s+/g, ' ').trim().slice(0, 300);\n  const out = (kind, retryable) => ({ ok: false, retryable, kind, code, subcode, message });\n\n  if (code === 4 || code === 17 || code === 32) return out('rate_limit', true);\n  if (code === 613) return subcode === 2018338 ? out('blocked', false) : out('rate_limit', true);\n  if (code === 368) return out('blocked', false);\n  if (code === 10) {\n    return subcode === 2534022 || subcode === 2018278 ? out('window_closed', false) : out('permission', false);\n  }\n  if (code === 100) {\n    if (subcode === 2534025) return out('invalid_comment', false);\n    if (subcode === 33 || subcode === 2534014) return out('not_found', false);\n    if (subcode === 2534037) return out('blocked', false);\n    return out('unknown', false);\n  }\n  if (code === 200) return out('permission', false);\n  if (code === 190 || code === 102) return out('token', false);\n  if (code === 551) return out('blocked', false);\n  if (code === 2 || code === 1) return out('transient', true);\n  // Sin código conocido: manda el estado HTTP.\n  if (code === null || status >= 500) {\n    if (status === 429) return out('rate_limit', true);\n    if (status >= 500 || status === 408 || status === 0) return out('transient', true);\n    if (status === 401) return out('token', false);\n    if (status === 403) return out('permission', false);\n    if (status === 404) return out('not_found', false);\n  }\n  if (detail.is_transient === true) return out('transient', true);\n  return out('unknown', false);\n}\n\nfunction grHash(text, seed) {\n  let hash = seed >>> 0;\n  for (let i = 0; i < text.length; i += 1) {\n    hash ^= text.charCodeAt(i);\n    hash = Math.imul(hash, 16777619) >>> 0;\n  }\n  return hash.toString(16).padStart(8, '0');\n}\n\nfunction grStable(value) {\n  if (Array.isArray(value)) return `[${value.map(grStable).join(',')}]`;\n  if (value && typeof value === 'object') {\n    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${grStable(value[key])}`).join(',')}}`;\n  }\n  return JSON.stringify(value === undefined ? null : value);\n}\n\n// Respuesta falsa del modo DRY_RUN. El id es el mismo para la misma operación y\n// los mismos argumentos (dry_<16 hex>): se puede repetir una prueba y comparar.\nfunction dryRunResponse(op, args) {\n  const source = `${op}|${grStable(args || {})}`;\n  const id = `dry_${grHash(source, 2166136261)}${grHash(source, 84696351)}`;\n  if (op === 'public_reply') return { id, dry_run: true };\n  if (op === 'private_reply' || op === 'send_dm') {\n    return { recipient_id: grPick(args, 'igsid', 'recipient_id') || `dry_user_${grHash(source, 7)}`, message_id: id, dry_run: true };\n  }\n  if (op === 'get_profile') return { id: grPick(args, 'igsid', 'recipient_id') || id, name: 'Usuario de prueba', username: 'usuario_demo', dry_run: true };\n  return { id, dry_run: true };\n}\n\n// attempt = nº del intento que acaba de fallar (1, 2, 3…). 1, 2, 5, 15, 60 y\n// 240 minutos; de ahí en adelante, siempre 240.\nfunction backoffMinutes(attempt) {\n  const number = Math.trunc(Number(attempt));\n  if (!Number.isFinite(number) || number < 1) return GRAPH_BACKOFF_MINUTES[0];\n  return GRAPH_BACKOFF_MINUTES[Math.min(number, GRAPH_BACKOFF_MINUTES.length) - 1];\n}\n\n// Cuándo volver a probar (ISO) tras el intento número \"attempt\".\nfunction nextAttemptAt(attempt, now) {\n  const base = now === undefined || now === null ? Date.now() : new Date(now).getTime();\n  return new Date(base + backoffMinutes(attempt) * 60000).toISOString();\n}\n\n// Días que han pasado desde que se creó el comentario (con decimales).\nfunction windowDays(createdAt, now) {\n  const created = new Date(createdAt).getTime();\n  const current = now === undefined || now === null ? Date.now() : new Date(now).getTime();\n  if (Number.isNaN(created) || Number.isNaN(current)) return Infinity;\n  return (current - created) / 86400000;\n}\n\n// ¿Sigue abierta la ventana de la respuesta privada (7 días por defecto)?\nfunction withinPrivateWindow(createdAt, now, days) {\n  const limit = days === undefined || days === null ? 7 : Number(days);\n  return windowDays(createdAt, now) < limit;\n}\n\nconst config = $('Configuración').first().json;\nconst body = $json.body || $json;\nconst op = String(body.op || '');\nconst args = { commentId: String(body.comment_id || body.commentId || ''), igsid: String(body.igsid || body.recipient_id || ''), text: String(body.text || body.message || ''), fields: String(body.fields || '') };\n// Seguro por defecto: solo se llama a Meta si dry_run vale exactamente «false».\nconst dry = String(config.dry_run).trim().toLowerCase() !== 'false';\nconst invalid = (message) => ({ json: { valid: false, result: { ok: false, id: null, recipient_id: null, message_id: null, retryable: false, kind: 'bad_request', code: null, subcode: null, message, dry_run: dry } } });\nif (!GRAPH_OPS.includes(op)) return invalid('operación desconocida: ' + op.slice(0, 40));\nconst account = String(config.ig_account_id || '').trim();\nif ((op === 'private_reply' || op === 'send_dm') && (!account || account === 'cambia-esto') && !dry) return invalid('falta ig_account_id en la Configuración de IG 08');\nlet req;\ntry { req = buildRequest(op, args, config); } catch (error) { return invalid(String(error.message).slice(0, 200)); }\nreturn { json: { valid: true, dry_run: dry, op, args, req } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "37f5f546-b1cb-5585-961d-ed0e6d95b159",
+      "name": "Preparar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        400
+      ],
+      "notes": "Valida la operación y arma la petición (sin token). Texto recortado a 1000 bytes UTF-8 en privada y DM."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0f76676d-587f-55da-a443-da207785f694",
+      "name": "¿Válida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.dry_run }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f4b944b0-5651-5c0c-8b48-931c54494f8c",
+      "name": "¿Simulación?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1180,
+        400
+      ],
+      "notes": "Sí: no se llama a Meta."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.req.method }}",
+              "rightValue": "GET",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2fd33580-ecb4-597b-a483-c43d24623346",
+      "name": "¿Consulta?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1420,
+        520
+      ],
+      "notes": "GET = get_profile; el resto son POST."
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Todo lo que sabe el agente de la Graph API de Meta, sin llamarla: construir la\n// petición (sin token: lo pone la credencial de n8n), clasificar los errores,\n// responder en DRY_RUN, recortar a 1000 bytes y calcular reintentos y ventanas.\n// Fuente de los códigos: notas de la documentación oficial (errores de Messenger\n// e Instagram Messaging). El único flujo que habla con Meta es «IG 08 - Graph API».\n\nconst GRAPH_DM_MAX_BYTES = 1000;\nconst GRAPH_BACKOFF_MINUTES = [1, 2, 5, 15, 60, 240];\nconst GRAPH_OPS = ['public_reply', 'private_reply', 'send_dm', 'get_profile'];\n\nfunction grPick(args, camel, snake) {\n  if (!args) return '';\n  const value = args[camel] !== undefined ? args[camel] : args[snake];\n  return value === undefined || value === null ? '' : String(value).trim();\n}\n\nfunction grNeed(op, name, value) {\n  if (!value) throw new Error(`graph.${op}: falta ${name}`);\n  return value;\n}\n\nfunction utf8Bytes(text) {\n  let total = 0;\n  for (const char of String(text === undefined || text === null ? '' : text)) {\n    const code = char.codePointAt(0);\n    total += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n  }\n  return total;\n}\n\n// Recorta a maxBytes bytes UTF-8 sin partir un carácter (ñ = 2 bytes, emoji = 4).\n// Tampoco deja colgando un unión de emojis (ZWJ) ni un selector de variante.\nfunction truncateUtf8(text, maxBytes) {\n  const limit = Math.max(0, Math.trunc(Number(maxBytes)) || 0);\n  let total = 0;\n  let out = '';\n  for (const char of String(text === undefined || text === null ? '' : text)) {\n    const code = char.codePointAt(0);\n    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n    if (total + size > limit) {\n      return out.replace(/[‍️]+$/, '');\n    }\n    total += size;\n    out += char;\n  }\n  return out;\n}\n\n// buildRequest('public_reply', { commentId, text }, cfg) -> { method, url, body, path }\n// cfg = el nodo Configuración del flujo 08: graph_base, graph_version, ig_account_id\n// (también se aceptan graphBase, graphVersion, igAccountId). path va sin host: es lo\n// que se guarda en ig_graph_log.\nfunction buildRequest(op, args, cfg) {\n  const config = cfg || {};\n  const base = String(config.graph_base || config.graphBase || 'https://graph.facebook.com').replace(/\\/+$/, '');\n  const version = String(config.graph_version || config.graphVersion || 'v27.0').replace(/^\\/+|\\/+$/g, '');\n  const account = String(config.ig_account_id || config.igAccountId || '').trim();\n  const make = (method, path, body) => ({ method, path: `/${version}/${path}`, url: `${base}/${version}/${path}`, body });\n  const enc = encodeURIComponent;\n  if (op === 'public_reply') {\n    const commentId = grNeed(op, 'commentId', grPick(args, 'commentId', 'comment_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(commentId)}/replies`, { message: text });\n  }\n  if (op === 'private_reply') {\n    const commentId = grNeed(op, 'commentId', grPick(args, 'commentId', 'comment_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(grNeed(op, 'ig_account_id', account))}/messages`, {\n      recipient: { comment_id: commentId },\n      message: { text: truncateUtf8(text, GRAPH_DM_MAX_BYTES) },\n    });\n  }\n  if (op === 'send_dm') {\n    const igsid = grNeed(op, 'igsid', grPick(args, 'igsid', 'recipient_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(grNeed(op, 'ig_account_id', account))}/messages`, {\n      recipient: { id: igsid },\n      message: { text: truncateUtf8(text, GRAPH_DM_MAX_BYTES) },\n    });\n  }\n  if (op === 'get_profile') {\n    const igsid = grNeed(op, 'igsid', grPick(args, 'igsid', 'recipient_id'));\n    const fields = grPick(args, 'fields', 'fields') || 'name,username';\n    return make('GET', `${enc(igsid)}?fields=${enc(fields).replace(/%2C/gi, ',')}`, null);\n  }\n  throw new Error(`graph: operación desconocida (${String(op)})`);\n}\n\nfunction grParse(body) {\n  if (typeof body === 'string') {\n    try { return JSON.parse(body); } catch { return { error: { message: body.slice(0, 300) } }; }\n  }\n  return body;\n}\n\n// Tabla de errores: código y subcódigo de Meta -> qué hacer.\n//   retryable = se puede volver a intentar más tarde (cola con backoff)\n//   kind      rate_limit | window_closed | invalid_comment | permission | token |\n//             not_found | blocked | transient | unknown\nfunction classifyError(httpStatus, body) {\n  const parsed = grParse(body);\n  const error = parsed && typeof parsed === 'object' && parsed.error !== undefined ? parsed.error : parsed;\n  const detail = error && typeof error === 'object' ? error : {};\n  const code = Number.isFinite(Number(detail.code)) && detail.code !== null && detail.code !== '' ? Number(detail.code) : null;\n  const subcode = Number.isFinite(Number(detail.error_subcode)) && detail.error_subcode !== null && detail.error_subcode !== '' ? Number(detail.error_subcode) : null;\n  const status = Number(httpStatus) || 0;\n  let message = '';\n  if (typeof error === 'string') message = error;\n  else if (detail.message) message = String(detail.message);\n  message = message.replace(/\\s+/g, ' ').trim().slice(0, 300);\n  const out = (kind, retryable) => ({ ok: false, retryable, kind, code, subcode, message });\n\n  if (code === 4 || code === 17 || code === 32) return out('rate_limit', true);\n  if (code === 613) return subcode === 2018338 ? out('blocked', false) : out('rate_limit', true);\n  if (code === 368) return out('blocked', false);\n  if (code === 10) {\n    return subcode === 2534022 || subcode === 2018278 ? out('window_closed', false) : out('permission', false);\n  }\n  if (code === 100) {\n    if (subcode === 2534025) return out('invalid_comment', false);\n    if (subcode === 33 || subcode === 2534014) return out('not_found', false);\n    if (subcode === 2534037) return out('blocked', false);\n    return out('unknown', false);\n  }\n  if (code === 200) return out('permission', false);\n  if (code === 190 || code === 102) return out('token', false);\n  if (code === 551) return out('blocked', false);\n  if (code === 2 || code === 1) return out('transient', true);\n  // Sin código conocido: manda el estado HTTP.\n  if (code === null || status >= 500) {\n    if (status === 429) return out('rate_limit', true);\n    if (status >= 500 || status === 408 || status === 0) return out('transient', true);\n    if (status === 401) return out('token', false);\n    if (status === 403) return out('permission', false);\n    if (status === 404) return out('not_found', false);\n  }\n  if (detail.is_transient === true) return out('transient', true);\n  return out('unknown', false);\n}\n\nfunction grHash(text, seed) {\n  let hash = seed >>> 0;\n  for (let i = 0; i < text.length; i += 1) {\n    hash ^= text.charCodeAt(i);\n    hash = Math.imul(hash, 16777619) >>> 0;\n  }\n  return hash.toString(16).padStart(8, '0');\n}\n\nfunction grStable(value) {\n  if (Array.isArray(value)) return `[${value.map(grStable).join(',')}]`;\n  if (value && typeof value === 'object') {\n    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${grStable(value[key])}`).join(',')}}`;\n  }\n  return JSON.stringify(value === undefined ? null : value);\n}\n\n// Respuesta falsa del modo DRY_RUN. El id es el mismo para la misma operación y\n// los mismos argumentos (dry_<16 hex>): se puede repetir una prueba y comparar.\nfunction dryRunResponse(op, args) {\n  const source = `${op}|${grStable(args || {})}`;\n  const id = `dry_${grHash(source, 2166136261)}${grHash(source, 84696351)}`;\n  if (op === 'public_reply') return { id, dry_run: true };\n  if (op === 'private_reply' || op === 'send_dm') {\n    return { recipient_id: grPick(args, 'igsid', 'recipient_id') || `dry_user_${grHash(source, 7)}`, message_id: id, dry_run: true };\n  }\n  if (op === 'get_profile') return { id: grPick(args, 'igsid', 'recipient_id') || id, name: 'Usuario de prueba', username: 'usuario_demo', dry_run: true };\n  return { id, dry_run: true };\n}\n\n// attempt = nº del intento que acaba de fallar (1, 2, 3…). 1, 2, 5, 15, 60 y\n// 240 minutos; de ahí en adelante, siempre 240.\nfunction backoffMinutes(attempt) {\n  const number = Math.trunc(Number(attempt));\n  if (!Number.isFinite(number) || number < 1) return GRAPH_BACKOFF_MINUTES[0];\n  return GRAPH_BACKOFF_MINUTES[Math.min(number, GRAPH_BACKOFF_MINUTES.length) - 1];\n}\n\n// Cuándo volver a probar (ISO) tras el intento número \"attempt\".\nfunction nextAttemptAt(attempt, now) {\n  const base = now === undefined || now === null ? Date.now() : new Date(now).getTime();\n  return new Date(base + backoffMinutes(attempt) * 60000).toISOString();\n}\n\n// Días que han pasado desde que se creó el comentario (con decimales).\nfunction windowDays(createdAt, now) {\n  const created = new Date(createdAt).getTime();\n  const current = now === undefined || now === null ? Date.now() : new Date(now).getTime();\n  if (Number.isNaN(created) || Number.isNaN(current)) return Infinity;\n  return (current - created) / 86400000;\n}\n\n// ¿Sigue abierta la ventana de la respuesta privada (7 días por defecto)?\nfunction withinPrivateWindow(createdAt, now, days) {\n  const limit = days === undefined || days === null ? 7 : Number(days);\n  return windowDays(createdAt, now) < limit;\n}\n\nfunction logParams(log, result) {\n  return [\n    log.op,\n    log.method,\n    log.path,\n    JSON.stringify(log.body === undefined ? null : log.body),\n    log.dry_run ? 'true' : 'false',\n    log.ok ? 'true' : 'false',\n    log.http_status === null || log.http_status === undefined ? '' : String(log.http_status),\n    JSON.stringify(log.error === undefined ? null : log.error),\n    JSON.stringify(result),\n  ];\n}\n\nconst prep = $json;\nconst fake = dryRunResponse(prep.op, prep.args);\nconst result = { ok: true, id: fake.id || null, recipient_id: fake.recipient_id || null, message_id: fake.message_id || null, retryable: false, kind: null, code: null, subcode: null, message: null, dry_run: true };\nif (prep.op === 'get_profile') { result.name = fake.name || null; result.username = fake.username || null; }\nconst log = { op: prep.op, method: prep.req.method, path: prep.req.path, body: prep.req.body, dry_run: true, ok: true, http_status: null, error: null };\nreturn { json: { result, params: logParams(log, result) } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "85c30da0-cc2b-5dc1-a577-bdc08f52a3ab",
+      "name": "Respuesta simulada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        280
+      ],
+      "notes": "Id falso y determinista (dry_<hash>): repetir una prueba da el mismo id. El cuerpo SÍ se guarda en ig_graph_log."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.req.body) }}"
+      },
+      "id": "3d7b2a0e-af74-5ae3-8e7b-17404a34ad6b",
+      "name": "Llamar a Meta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1660,
+        560
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram Token"
+        }
+      },
+      "notes": "POST a {graph_base}/{graph_version}/... con Authorization: Bearer (credencial Instagram Token). Un 4xx no es error de n8n: se lee el cuerpo.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.req.url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "bf41ed0b-8a92-5674-94ba-ce6d6b5dd2c3",
+      "name": "Consultar perfil",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1660,
+        420
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram Token"
+        }
+      },
+      "notes": "GET /{igsid}?fields=name,username. Solo diagnóstico.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Todo lo que sabe el agente de la Graph API de Meta, sin llamarla: construir la\n// petición (sin token: lo pone la credencial de n8n), clasificar los errores,\n// responder en DRY_RUN, recortar a 1000 bytes y calcular reintentos y ventanas.\n// Fuente de los códigos: notas de la documentación oficial (errores de Messenger\n// e Instagram Messaging). El único flujo que habla con Meta es «IG 08 - Graph API».\n\nconst GRAPH_DM_MAX_BYTES = 1000;\nconst GRAPH_BACKOFF_MINUTES = [1, 2, 5, 15, 60, 240];\nconst GRAPH_OPS = ['public_reply', 'private_reply', 'send_dm', 'get_profile'];\n\nfunction grPick(args, camel, snake) {\n  if (!args) return '';\n  const value = args[camel] !== undefined ? args[camel] : args[snake];\n  return value === undefined || value === null ? '' : String(value).trim();\n}\n\nfunction grNeed(op, name, value) {\n  if (!value) throw new Error(`graph.${op}: falta ${name}`);\n  return value;\n}\n\nfunction utf8Bytes(text) {\n  let total = 0;\n  for (const char of String(text === undefined || text === null ? '' : text)) {\n    const code = char.codePointAt(0);\n    total += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n  }\n  return total;\n}\n\n// Recorta a maxBytes bytes UTF-8 sin partir un carácter (ñ = 2 bytes, emoji = 4).\n// Tampoco deja colgando un unión de emojis (ZWJ) ni un selector de variante.\nfunction truncateUtf8(text, maxBytes) {\n  const limit = Math.max(0, Math.trunc(Number(maxBytes)) || 0);\n  let total = 0;\n  let out = '';\n  for (const char of String(text === undefined || text === null ? '' : text)) {\n    const code = char.codePointAt(0);\n    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n    if (total + size > limit) {\n      return out.replace(/[‍️]+$/, '');\n    }\n    total += size;\n    out += char;\n  }\n  return out;\n}\n\n// buildRequest('public_reply', { commentId, text }, cfg) -> { method, url, body, path }\n// cfg = el nodo Configuración del flujo 08: graph_base, graph_version, ig_account_id\n// (también se aceptan graphBase, graphVersion, igAccountId). path va sin host: es lo\n// que se guarda en ig_graph_log.\nfunction buildRequest(op, args, cfg) {\n  const config = cfg || {};\n  const base = String(config.graph_base || config.graphBase || 'https://graph.facebook.com').replace(/\\/+$/, '');\n  const version = String(config.graph_version || config.graphVersion || 'v27.0').replace(/^\\/+|\\/+$/g, '');\n  const account = String(config.ig_account_id || config.igAccountId || '').trim();\n  const make = (method, path, body) => ({ method, path: `/${version}/${path}`, url: `${base}/${version}/${path}`, body });\n  const enc = encodeURIComponent;\n  if (op === 'public_reply') {\n    const commentId = grNeed(op, 'commentId', grPick(args, 'commentId', 'comment_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(commentId)}/replies`, { message: text });\n  }\n  if (op === 'private_reply') {\n    const commentId = grNeed(op, 'commentId', grPick(args, 'commentId', 'comment_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(grNeed(op, 'ig_account_id', account))}/messages`, {\n      recipient: { comment_id: commentId },\n      message: { text: truncateUtf8(text, GRAPH_DM_MAX_BYTES) },\n    });\n  }\n  if (op === 'send_dm') {\n    const igsid = grNeed(op, 'igsid', grPick(args, 'igsid', 'recipient_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(grNeed(op, 'ig_account_id', account))}/messages`, {\n      recipient: { id: igsid },\n      message: { text: truncateUtf8(text, GRAPH_DM_MAX_BYTES) },\n    });\n  }\n  if (op === 'get_profile') {\n    const igsid = grNeed(op, 'igsid', grPick(args, 'igsid', 'recipient_id'));\n    const fields = grPick(args, 'fields', 'fields') || 'name,username';\n    return make('GET', `${enc(igsid)}?fields=${enc(fields).replace(/%2C/gi, ',')}`, null);\n  }\n  throw new Error(`graph: operación desconocida (${String(op)})`);\n}\n\nfunction grParse(body) {\n  if (typeof body === 'string') {\n    try { return JSON.parse(body); } catch { return { error: { message: body.slice(0, 300) } }; }\n  }\n  return body;\n}\n\n// Tabla de errores: código y subcódigo de Meta -> qué hacer.\n//   retryable = se puede volver a intentar más tarde (cola con backoff)\n//   kind      rate_limit | window_closed | invalid_comment | permission | token |\n//             not_found | blocked | transient | unknown\nfunction classifyError(httpStatus, body) {\n  const parsed = grParse(body);\n  const error = parsed && typeof parsed === 'object' && parsed.error !== undefined ? parsed.error : parsed;\n  const detail = error && typeof error === 'object' ? error : {};\n  const code = Number.isFinite(Number(detail.code)) && detail.code !== null && detail.code !== '' ? Number(detail.code) : null;\n  const subcode = Number.isFinite(Number(detail.error_subcode)) && detail.error_subcode !== null && detail.error_subcode !== '' ? Number(detail.error_subcode) : null;\n  const status = Number(httpStatus) || 0;\n  let message = '';\n  if (typeof error === 'string') message = error;\n  else if (detail.message) message = String(detail.message);\n  message = message.replace(/\\s+/g, ' ').trim().slice(0, 300);\n  const out = (kind, retryable) => ({ ok: false, retryable, kind, code, subcode, message });\n\n  if (code === 4 || code === 17 || code === 32) return out('rate_limit', true);\n  if (code === 613) return subcode === 2018338 ? out('blocked', false) : out('rate_limit', true);\n  if (code === 368) return out('blocked', false);\n  if (code === 10) {\n    return subcode === 2534022 || subcode === 2018278 ? out('window_closed', false) : out('permission', false);\n  }\n  if (code === 100) {\n    if (subcode === 2534025) return out('invalid_comment', false);\n    if (subcode === 33 || subcode === 2534014) return out('not_found', false);\n    if (subcode === 2534037) return out('blocked', false);\n    return out('unknown', false);\n  }\n  if (code === 200) return out('permission', false);\n  if (code === 190 || code === 102) return out('token', false);\n  if (code === 551) return out('blocked', false);\n  if (code === 2 || code === 1) return out('transient', true);\n  // Sin código conocido: manda el estado HTTP.\n  if (code === null || status >= 500) {\n    if (status === 429) return out('rate_limit', true);\n    if (status >= 500 || status === 408 || status === 0) return out('transient', true);\n    if (status === 401) return out('token', false);\n    if (status === 403) return out('permission', false);\n    if (status === 404) return out('not_found', false);\n  }\n  if (detail.is_transient === true) return out('transient', true);\n  return out('unknown', false);\n}\n\nfunction grHash(text, seed) {\n  let hash = seed >>> 0;\n  for (let i = 0; i < text.length; i += 1) {\n    hash ^= text.charCodeAt(i);\n    hash = Math.imul(hash, 16777619) >>> 0;\n  }\n  return hash.toString(16).padStart(8, '0');\n}\n\nfunction grStable(value) {\n  if (Array.isArray(value)) return `[${value.map(grStable).join(',')}]`;\n  if (value && typeof value === 'object') {\n    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${grStable(value[key])}`).join(',')}}`;\n  }\n  return JSON.stringify(value === undefined ? null : value);\n}\n\n// Respuesta falsa del modo DRY_RUN. El id es el mismo para la misma operación y\n// los mismos argumentos (dry_<16 hex>): se puede repetir una prueba y comparar.\nfunction dryRunResponse(op, args) {\n  const source = `${op}|${grStable(args || {})}`;\n  const id = `dry_${grHash(source, 2166136261)}${grHash(source, 84696351)}`;\n  if (op === 'public_reply') return { id, dry_run: true };\n  if (op === 'private_reply' || op === 'send_dm') {\n    return { recipient_id: grPick(args, 'igsid', 'recipient_id') || `dry_user_${grHash(source, 7)}`, message_id: id, dry_run: true };\n  }\n  if (op === 'get_profile') return { id: grPick(args, 'igsid', 'recipient_id') || id, name: 'Usuario de prueba', username: 'usuario_demo', dry_run: true };\n  return { id, dry_run: true };\n}\n\n// attempt = nº del intento que acaba de fallar (1, 2, 3…). 1, 2, 5, 15, 60 y\n// 240 minutos; de ahí en adelante, siempre 240.\nfunction backoffMinutes(attempt) {\n  const number = Math.trunc(Number(attempt));\n  if (!Number.isFinite(number) || number < 1) return GRAPH_BACKOFF_MINUTES[0];\n  return GRAPH_BACKOFF_MINUTES[Math.min(number, GRAPH_BACKOFF_MINUTES.length) - 1];\n}\n\n// Cuándo volver a probar (ISO) tras el intento número \"attempt\".\nfunction nextAttemptAt(attempt, now) {\n  const base = now === undefined || now === null ? Date.now() : new Date(now).getTime();\n  return new Date(base + backoffMinutes(attempt) * 60000).toISOString();\n}\n\n// Días que han pasado desde que se creó el comentario (con decimales).\nfunction windowDays(createdAt, now) {\n  const created = new Date(createdAt).getTime();\n  const current = now === undefined || now === null ? Date.now() : new Date(now).getTime();\n  if (Number.isNaN(created) || Number.isNaN(current)) return Infinity;\n  return (current - created) / 86400000;\n}\n\n// ¿Sigue abierta la ventana de la respuesta privada (7 días por defecto)?\nfunction withinPrivateWindow(createdAt, now, days) {\n  const limit = days === undefined || days === null ? 7 : Number(days);\n  return windowDays(createdAt, now) < limit;\n}\n\nfunction logParams(log, result) {\n  return [\n    log.op,\n    log.method,\n    log.path,\n    JSON.stringify(log.body === undefined ? null : log.body),\n    log.dry_run ? 'true' : 'false',\n    log.ok ? 'true' : 'false',\n    log.http_status === null || log.http_status === undefined ? '' : String(log.http_status),\n    JSON.stringify(log.error === undefined ? null : log.error),\n    JSON.stringify(result),\n  ];\n}\n\nconst prep = $('Preparar').item.json;\nconst status = Number($json.statusCode || 0);\nconst body = $json.body;\nconst success = status >= 200 && status < 300 && body && typeof body === 'object' && !body.error;\nlet result;\nif (success) {\n  result = { ok: true, id: body.id ? String(body.id) : null, recipient_id: body.recipient_id ? String(body.recipient_id) : null, message_id: body.message_id ? String(body.message_id) : null, retryable: false, kind: null, code: null, subcode: null, message: null, dry_run: false };\n  if (prep.op === 'get_profile') { result.name = body.name || null; result.username = body.username || null; }\n} else {\n  const raw = $json.error;\n  const fallback = { error: { message: String(typeof raw === 'string' ? raw : (raw && (raw.message || raw.description)) || 'sin respuesta de Meta').slice(0, 300) } };\n  const failure = classifyError(status, body !== undefined && body !== null && body !== '' ? body : fallback);\n  result = { ok: false, id: null, recipient_id: null, message_id: null, retryable: failure.retryable, kind: failure.kind, code: failure.code, subcode: failure.subcode, message: failure.message, dry_run: false };\n}\nconst error = result.ok ? null : { kind: result.kind, code: result.code, subcode: result.subcode, message: result.message, retryable: result.retryable };\nconst log = { op: prep.op, method: prep.req.method, path: prep.req.path, body: null, dry_run: false, ok: result.ok, http_status: status || null, error };\nreturn { json: { result, params: logParams(log, result) } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "c9877f38-ec57-5683-985b-35dff22d4e75",
+      "name": "Clasificar respuesta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        500
+      ],
+      "notes": "2xx → ok. Si no, classifyError (tabla de errores de Meta) → retryable/kind/code/subcode. Sin cuerpo ni token en el log de llamadas reales."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO ig_graph_log (op, method, path, body, dry_run, ok, http_status, error)\n  VALUES ($1::text, $2::text, $3::text, NULLIF($4::text, 'null')::jsonb, $5::boolean, $6::boolean,\n          NULLIF($7::text, '')::integer, NULLIF($8::text, 'null')::jsonb)\n  RETURNING id\n)\nSELECT $9::jsonb AS result, (SELECT id FROM ins) AS log_id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ $json.params }}"
+        }
+      },
+      "id": "62cf83c3-d4b6-5718-9991-83fa4d70860f",
+      "name": "Registrar llamada",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2140,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "ig_graph_log: todas las llamadas simuladas (con el cuerpo) y las reales (sin cuerpo y sin token). Devuelve el resultado para que la respuesta no dependa del emparejado de items. Si falla el INSERT no se pierde el resultado de Meta.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "let result = $json.result;\nif (typeof result === 'string') result = JSON.parse(result);\nif (!result) {\n  // El INSERT en ig_graph_log falló: el resultado de Meta no se puede perder.\n  for (const name of ['Clasificar respuesta', 'Respuesta simulada']) {\n    try { result = $(name).item.json.result; } catch (error) { result = null; }\n    if (result) break;\n  }\n}\nreturn { json: result || { ok: false, retryable: true, kind: 'transient', code: null, subcode: null, message: 'IG 08 sin resultado', dry_run: null } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "98063cf4-483c-5863-a75e-f79bf8fc7ffd",
+      "name": "Resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2380,
+        400
+      ],
+      "notes": "Último nodo de todas las ramas: es lo que devuelve el webhook."
+    }
+  ],
+  "connections": {
+    "Webhook Graph": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuración": {
+      "main": [
+        [
+          {
+            "node": "Preparar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar": {
+      "main": [
+        [
+          {
+            "node": "¿Válida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Válida?": {
+      "main": [
+        [
+          {
+            "node": "¿Simulación?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Simulación?": {
+      "main": [
+        [
+          {
+            "node": "Respuesta simulada",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Consulta?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Consulta?": {
+      "main": [
+        [
+          {
+            "node": "Consultar perfil",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Llamar a Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respuesta simulada": {
+      "main": [
+        [
+          {
+            "node": "Registrar llamada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar perfil": {
+      "main": [
+        [
+          {
+            "node": "Clasificar respuesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llamar a Meta": {
+      "main": [
+        [
+          {
+            "node": "Clasificar respuesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar respuesta": {
+      "main": [
+        [
+          {
+            "node": "Registrar llamada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar llamada": {
+      "main": [
+        [
+          {
+            "node": "Resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,1693 @@
+{
+  "name": "IG 06 - Botones",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "### IG 06 Botones\n\n**Trigger de Telegram** (bot del episodio 4, credencial «Telegram Instagram») y, para pruebas, `POST /webhook/ig-button-test` (cabecera X-IG-API-Key) con un update de Telegram inventado: el mismo camino.\n\n⚠️ **Fase 3: NO publiques este flujo** mientras no exista el bot nuevo. Un bot solo tiene UN webhook: si este trigger usara el bot del ep3, le quitaría el webhook a «03b - Botones» del correo. Con el flujo sin publicar, el trigger no registra nada en Telegram; el webhook de prueba sí funciona (pon un número inventado en `telegram_chat_id` de esta Configuración y úsalo como `chat.id` en el update de prueba). Las llamadas a Telegram con ids falsos fallan sin parar el flujo.\n\nCada botón lleva `ig:<acción>:<uuid>`. **Leer fila** → `callbackOutcome` (telegram.js) → **Aplicar botón** (`UPDATE … WHERE status = <el de antes>`). Doble clic o botón viejo: el UPDATE no toca nada, se relee la fila y sale solo el aviso. Nunca se envía dos veces.\n\nAprobar → `aprobado` → IG 04 modo manual. Editar → `esperando_edicion` y un mensaje de ayuda: con UNA edición abierta vale cualquier texto del chat; con varias, hay que responder citando el mensaje de ayuda (`editOutcome`). Rechazar → `rechazado`. Tras decidir, el mensaje pierde los botones.\n\nChats no autorizados: solo `telegram_ajeno` en ig_actions, sin respuesta.",
+        "height": 460,
+        "width": 680,
+        "color": 5
+      },
+      "id": "40a94a51-9eca-5161-b137-00d2d54ad7a3",
+      "name": "Notas botones",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        80,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "updates": [
+          "callback_query",
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "a739633a-0261-5306-9813-5f98b04b7169",
+      "name": "Telegram",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        260
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "notes": "Bot del ep4. Sin 'Restrict to Chat IDs': en 2.10.2 descarta los botones. El filtro está en Leer update. NO publicar en Fase 3.",
+      "webhookId": "5cccb5ba-c812-52fa-928c-655cb11471e8"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ig-button-test",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "51a48db1-4714-5052-a10a-5bd7ebf8de21",
+      "name": "Probar botón",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        220,
+        460
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "POST /webhook/ig-button-test con un update de Telegram (callback_query o message). Solo pruebas.",
+      "webhookId": "9a00c4ca-2013-58f7-b5b2-18ba434caee4"
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "97898f28-7573-59a5-9cc4-e540c1e4a74a",
+              "name": "approval_hours",
+              "value": 24,
+              "type": "number"
+            },
+            {
+              "id": "c4d14efa-84a8-54d4-913c-f742a9949630",
+              "name": "telegram_chat_id",
+              "value": "cambia-esto",
+              "type": "string"
+            },
+            {
+              "id": "8e3fae5e-edf0-58ff-8573-eb9de8ddc7ab",
+              "name": "telegram_user_ids",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "8969e8c2-96aa-53e0-99e6-3f811d9327b0",
+              "name": "n8n_url",
+              "value": "http://localhost:5678",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "73b5a6eb-2f52-59b3-ae51-b4b0657265ac",
+      "name": "Configuración",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        460,
+        360
+      ],
+      "notes": "Valores que se ven en cámara. El .env no entra aquí: Coolify bloquea $env. Los secretos NO van aquí."
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Botones y textos que llegan al bot de Telegram del episodio 4\n// (credencial «Telegram Instagram»). El estado vive en Postgres (ig_messages):\n// aquí solo se decide QUÉ transición pedir; la aplica IG 06 con\n// UPDATE … WHERE id = $1 AND status = <fromStatus>. Si ese UPDATE no toca\n// ninguna fila (doble clic, otra ejecución ganó), se vuelve a llamar a\n// callbackOutcome con el estado real y sale un aviso sin acción.\n//\n// La ventana de 24 h NO se comprueba aquí: lo hace IG 04 justo antes de\n// enviar. Por eso todo lo que acaba en envío lleva needsWindowCheck: true.\n//\n// Sin require: este fichero se copia dentro de un Code node de n8n.\n\nconst ACTIONS = ['approve', 'reject', 'edit'];\nconst CALLBACK_RE = /^ig:(approve|reject|edit):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;\nconst NIL_UUID = '00000000-0000-0000-0000-000000000000';\nconst CALLBACK_MAX_BYTES = 64;\nconst DM_MAX_BYTES = 1000;\n\nfunction utf8Bytes(value) {\n  let bytes = 0;\n  for (const ch of String(value ?? '')) {\n    const cp = ch.codePointAt(0);\n    bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;\n  }\n  return bytes;\n}\n\nfunction idList(value) {\n  return String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);\n}\n\nconst NUMERIC_ID = /^-?\\d{1,20}$/;\n\n// Autorizado = el chat es el configurado (número; «cambia-esto» o vacío no\n// autoriza a nadie) Y, si hay telegram_user_ids, quien pulsa está en la lista.\n// Una lista con entradas que no son números no se ignora: no autoriza a nadie.\nfunction isAuthorized(chatId, fromId, cfg) {\n  const config = cfg || {};\n  const ownerChat = String(config.telegram_chat_id ?? '').trim();\n  if (!NUMERIC_ID.test(ownerChat)) return false;\n  const chat = String(chatId ?? '').trim();\n  if (!chat || chat !== ownerChat) return false;\n  const users = idList(config.telegram_user_ids);\n  if (users.length === 0) return true;\n  if (users.some((user) => !NUMERIC_ID.test(user))) return false;\n  const from = String(fromId ?? '').trim();\n  return Boolean(from) && users.includes(from);\n}\n\nfunction parseCallbackData(data) {\n  if (typeof data !== 'string' || utf8Bytes(data) > CALLBACK_MAX_BYTES) return null;\n  const match = data.match(CALLBACK_RE);\n  if (!match || match[2] === NIL_UUID) return null;\n  return { action: match[1], igMessageId: match[2] };\n}\n\n// callback_data de los botones: 'ig:<acción>:<uuid>' (47 bytes, límite 64).\nfunction buildCallbackData(action, igMessageId) {\n  const data = 'ig:' + action + ':' + String(igMessageId ?? '').toLowerCase();\n  return parseCallbackData(data) ? data : '';\n}\n\n// update de Telegram → { kind, action, igMessageId, text, chatId, fromId,\n// messageId, callbackId, replyTo, reason }.\n// kind: 'button' | 'text' | 'foreign' (no autorizado) | 'ignore'.\nfunction parseUpdate(update, cfg) {\n  const base = {\n    kind: 'ignore', action: '', igMessageId: '', text: '', chatId: '', fromId: '',\n    messageId: '', callbackId: '', replyTo: '', reason: '',\n  };\n  if (!update || typeof update !== 'object') return { ...base, reason: 'sin_update' };\n\n  if (update.callback_query && typeof update.callback_query === 'object') {\n    const query = update.callback_query;\n    const message = query.message || {};\n    const item = {\n      ...base,\n      chatId: message.chat && message.chat.id !== undefined ? String(message.chat.id) : '',\n      fromId: query.from && query.from.id !== undefined ? String(query.from.id) : '',\n      messageId: message.message_id !== undefined ? String(message.message_id) : '',\n      callbackId: String(query.id || ''),\n    };\n    if (!isAuthorized(item.chatId, item.fromId, cfg)) return { ...item, kind: 'foreign', reason: 'no_autorizado' };\n    const parsed = parseCallbackData(query.data);\n    // Se devuelve callbackId igualmente: hay que contestar al botón para que\n    // Telegram quite el reloj, aunque no se haga nada.\n    if (!parsed) return { ...item, kind: 'ignore', reason: 'callback_invalido' };\n    return { ...item, kind: 'button', action: parsed.action, igMessageId: parsed.igMessageId };\n  }\n\n  // Solo mensajes nuevos. Un mensaje editado, de canal o de un bot no cuenta.\n  const message = update.message;\n  if (!message || typeof message !== 'object') return { ...base, reason: 'tipo_no_usado' };\n  const item = {\n    ...base,\n    chatId: message.chat && message.chat.id !== undefined ? String(message.chat.id) : '',\n    fromId: message.from && message.from.id !== undefined ? String(message.from.id) : '',\n    messageId: message.message_id !== undefined ? String(message.message_id) : '',\n    replyTo: message.reply_to_message && message.reply_to_message.message_id !== undefined\n      ? String(message.reply_to_message.message_id) : '',\n  };\n  if (message.from && message.from.is_bot) return { ...item, reason: 'bot' };\n  if (!isAuthorized(item.chatId, item.fromId, cfg)) return { ...item, kind: 'foreign', reason: 'no_autorizado' };\n  if (typeof message.text !== 'string') return { ...item, reason: 'sin_texto' };\n  if (/^\\/[a-z0-9_]+(@\\w+)?(\\s|$)/i.test(message.text.trim())) return { ...item, reason: 'comando' };\n  return { ...item, kind: 'text', text: message.text };\n}\n\n// --- Matriz estado × botón ---------------------------------------------------\n\nconst NOTICES = {\n  aprobado: 'Ya está aprobado y en cola de envío. No se envía otra vez.',\n  enviando: 'Ya se está enviando. No se envía otra vez.',\n  avisando: 'Aún se está preparando este aviso. Espera un momento.',\n  respondido_auto: 'Ya se respondió solo. No se envía otra vez.',\n  respondido_manual: 'Ya se respondió. No se envía otra vez.',\n  rechazado: 'Ya estaba rechazado. No se envía nada.',\n  aprobacion_vencida: 'Venció el plazo de aprobación. No se envía nada.',\n  vencido_ventana: 'La ventana de 24 h de Instagram está cerrada: ya no se puede responder por DM.',\n  retenido_bucle: 'Retenido por el freno anti-bucles y aún sin pasar a aprobación. Este botón no envía nada.',\n};\n// Estados en los que otra ejecución está trabajando: no se tocan los botones.\nconst IN_FLIGHT = ['avisando', 'aprobado', 'enviando'];\n// Estados ya resueltos: se quitan los botones con la línea de resultado\n// (clave de resultLine en format.js).\nconst STALE_RESULTS = {\n  respondido_auto: 'ya_respondido',\n  respondido_manual: 'ya_respondido',\n  rechazado: 'ya_rechazado',\n  aprobacion_vencida: 'vencido',\n  vencido_ventana: 'vencido_ventana',\n  // Una fila retenida recibe botones cuando IG 05 la pasa a esperando_aprobacion.\n  // Si un botón la encuentra aún así, no llegó a aprobación: el botón no hace nada.\n  retenido_bucle: 'retenido',\n};\n// Estados que admiten botones.\nconst OPEN = ['esperando_aprobacion', 'esperando_edicion', 'error_envio'];\n\nfunction rowOf(state) {\n  if (state && typeof state === 'object') {\n    return {\n      exists: Boolean(state.id || state.status),\n      status: String(state.status || state.previous_status || ''),\n      blocked: Boolean(state.injection_flag || state.blocked),\n      hasFinal: String(state.final_reply || '').trim() !== '' || Boolean(state.has_final_reply),\n      hasDraft: state.has_draft !== undefined ? Boolean(state.has_draft) : String(state.draft_reply || '').trim() !== '',\n      expired: Boolean(state.expired),\n    };\n  }\n  const status = String(state || '');\n  return { exists: status !== '', status, blocked: false, hasFinal: false, hasDraft: true, expired: false };\n}\n\n// state: el estado (string) o la fila { status, injection_flag, draft_reply |\n// has_draft, final_reply | has_final_reply, expired }. action: approve|reject|edit.\n// Devuelve { apply, fromStatus, nextStatus, next, notice, result,\n// removeButtons, needsWindowCheck }.\n// apply=false → no se escribe nada en la base de datos.\nfunction callbackOutcome(state, action) {\n  const row = rowOf(state);\n  const out = (fields) => ({\n    apply: false, fromStatus: row.status, nextStatus: row.status, next: 'none', notice: '', result: '',\n    removeButtons: false, needsWindowCheck: false, ...fields,\n  });\n  if (!ACTIONS.includes(action)) return out({ notice: 'Botón desconocido. No se hace nada.' });\n  if (!row.exists) return out({ notice: 'Este mensaje ya no corresponde a ningún DM (¿borrado por retención?).', result: 'sin_fila', removeButtons: true });\n\n  const status = row.status;\n  if (OPEN.includes(status) && row.expired) {\n    return out({ notice: NOTICES.aprobacion_vencida, result: 'vencido', removeButtons: true });\n  }\n\n  if (status === 'esperando_aprobacion' || status === 'error_envio') {\n    if (action === 'approve') {\n      // Bloqueado (inyección, fuga, promesa, enlace ajeno) o sin borrador:\n      // Aprobar no tiene nada seguro que enviar. Editar y Rechazar siguen valiendo.\n      if ((row.blocked || !row.hasDraft) && !row.hasFinal) {\n        return out({ notice: row.blocked\n          ? 'Este DM está bloqueado (intentó dar órdenes, filtraba instrucciones, prometía algo o traía un enlace ajeno). No se puede aprobar: usa Editar y escribe tú la respuesta.'\n          : 'No hay borrador que enviar. Usa Editar y escribe tú la respuesta, o Rechazar.' });\n      }\n      return out({\n        apply: true, nextStatus: 'aprobado', next: 'send', result: 'enviando', removeButtons: true, needsWindowCheck: true,\n        notice: status === 'error_envio' ? 'Aprobado otra vez. Reintentando el envío.' : 'Aprobado. Enviando la respuesta.',\n      });\n    }\n    if (action === 'reject') {\n      return out({ apply: true, nextStatus: 'rechazado', next: 'reject', result: 'rechazado', removeButtons: true, notice: 'Rechazado. No se envía nada.' });\n    }\n    return out({\n      apply: true, nextStatus: 'esperando_edicion', next: 'edit', result: 'editando', removeButtons: true,\n      notice: 'Escribe ahora en este chat el texto que se enviará (máx. 1000 bytes).',\n    });\n  }\n\n  if (status === 'esperando_edicion') {\n    if (action === 'edit') return out({ notice: 'Ya estás editando: escribe el texto en este chat.' });\n    if (action === 'reject') {\n      return out({ apply: true, nextStatus: 'rechazado', next: 'reject', result: 'rechazado', removeButtons: true, notice: 'Rechazado. Se cancela la edición y no se envía nada.' });\n    }\n    // Aprobar durante la edición = enviar el borrador original, si se puede.\n    if (row.blocked || !row.hasDraft) {\n      return out({ notice: 'No hay borrador seguro que aprobar. Escribe el texto en este chat o pulsa Rechazar.' });\n    }\n    return out({\n      apply: true, nextStatus: 'aprobado', next: 'send', result: 'enviando', removeButtons: true, needsWindowCheck: true,\n      notice: 'Aprobado el borrador original. Se cancela la edición y se envía.',\n    });\n  }\n\n  const notice = NOTICES[status] || `No se puede hacer eso ahora (estado: ${status}).`;\n  if (IN_FLIGHT.includes(status)) return out({ notice });\n  if (STALE_RESULTS[status]) return out({ notice, result: STALE_RESULTS[status], removeButtons: true });\n  return out({ notice, result: 'otro' });\n}\n\n// --- Edición -----------------------------------------------------------------\n\n// Texto libre del chat autorizado mientras hay DMs en esperando_edicion.\n// pending: filas de ese chat en esperando_edicion\n//   [{ id, telegram_edit_id?, approval_due_at? }].\n// Se aplica si hay UNA sola fila viva (o si el texto responde, citándolo, al\n// mensaje de edición de una de ellas). Más de 1000 bytes: aviso y no se envía.\nfunction editOutcome(input) {\n  const args = input || {};\n  const now = args.now === undefined ? Date.now() : new Date(args.now).getTime();\n  const text = String(args.text ?? '').replace(/\\r\\n?/g, '\\n').trim();\n  const out = (fields) => ({\n    apply: false, igMessageId: '', finalReply: '', fromStatus: 'esperando_edicion', nextStatus: 'esperando_edicion',\n    notice: '', reason: '', bytes: utf8Bytes(text), needsWindowCheck: false, ...fields,\n  });\n  const alive = (Array.isArray(args.pending) ? args.pending : []).filter((row) => {\n    if (!row || !row.id) return false;\n    if (row.approval_due_at === null || row.approval_due_at === undefined || row.approval_due_at === '') return true;\n    const due = new Date(row.approval_due_at).getTime();\n    return Number.isFinite(due) && Number.isFinite(now) && due > now;\n  });\n  if (!text) return out({ reason: 'vacio', notice: 'Texto vacío: no se envía nada.' });\n  const replyTo = String(args.replyTo ?? '');\n  let target = replyTo ? alive.find((row) => String(row.telegram_edit_id ?? '') === replyTo) : null;\n  if (!target) {\n    if (alive.length === 0) return out({ reason: 'sin_edicion', notice: 'No hay ninguna respuesta esperando texto. Ese mensaje no se envía a nadie.' });\n    if (alive.length > 1) {\n      return out({ reason: 'varias_ediciones', notice: `Hay ${alive.length} respuestas esperando texto. Contesta citando el mensaje de edición de la que quieras; este texto no se envía.` });\n    }\n    target = alive[0];\n  }\n  const bytes = utf8Bytes(text);\n  if (bytes > DM_MAX_BYTES) {\n    return out({ igMessageId: String(target.id), reason: 'demasiado_largo', notice: `Tu texto ocupa ${bytes} bytes y el máximo de Instagram es ${DM_MAX_BYTES} (cada tilde o ñ cuenta 2 y cada emoji 4). No se envía: escríbelo más corto.` });\n  }\n  return out({\n    apply: true, igMessageId: String(target.id), finalReply: text, nextStatus: 'aprobado', reason: 'editado',\n    notice: 'Texto guardado. Enviando tu respuesta.', needsWindowCheck: true,\n  });\n}\n\n// El trigger entrega el update tal cual; el webhook de prueba, dentro de body.\nconst fromWebhook = $json.body !== undefined && $json.headers !== undefined;\nconst update = fromWebhook ? $json.body : $json;\nreturn { json: { ...parseUpdate(update, $('Configuración').first().json), test: fromWebhook } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "5c9b3e3a-f701-572b-813e-55c8e469054e",
+      "name": "Leer update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        360
+      ],
+      "notes": "Comprueba chat.id (y from.id si hay lista) contra la Configuración. Lee ig:<acción>:<uuid>."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.kind }}",
+              "rightValue": "button",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6460ae66-5719-520c-b55e-99e94381e972",
+      "name": "¿Botón?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        920,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT m.id::text AS id, m.status, m.igsid, m.username, m.text_normalized, m.category, m.confidence, m.draft_reply, m.final_reply, m.reasoning, m.reasons, m.rag_sources, m.injection_flag, m.sensitive_flag, m.telegram_chat_id, m.telegram_message_id,\n       (m.approval_due_at IS NOT NULL AND m.approval_due_at <= now()) AS expired,\n       GREATEST(m.window_expires_at, (SELECT max(o.window_expires_at) FROM ig_messages o WHERE o.igsid = m.igsid)) AS window_expires_at,\n       EXISTS (SELECT 1 FROM ig_actions a WHERE a.message_id = m.id AND a.action = 'aviso_error_envio'\n               AND a.detail->>'telegram_message_id' = m.telegram_message_id) AS on_failure_message,\n       (SELECT a.detail->>'error' FROM ig_actions a WHERE a.message_id = m.id AND a.action = 'error_envio'\n         ORDER BY a.id DESC LIMIT 1) AS last_send_error,\n       (EXISTS (SELECT 1 FROM ig_actions a WHERE a.message_id = m.id AND a.action = 'retenido_bucle')\n         OR COALESCE(m.reasons @> '[\"bucle\"]'::jsonb, false)) AS loop_hold\nFROM (SELECT 1) AS one LEFT JOIN ig_messages m ON m.id = $1::uuid",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.igMessageId] }}"
+        }
+      },
+      "id": "36454119-9304-54bc-a7ae-2791e3c455a7",
+      "name": "Leer fila",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1140,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "La fila del botón, por el uuid del callback_data.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Botones y textos que llegan al bot de Telegram del episodio 4\n// (credencial «Telegram Instagram»). El estado vive en Postgres (ig_messages):\n// aquí solo se decide QUÉ transición pedir; la aplica IG 06 con\n// UPDATE … WHERE id = $1 AND status = <fromStatus>. Si ese UPDATE no toca\n// ninguna fila (doble clic, otra ejecución ganó), se vuelve a llamar a\n// callbackOutcome con el estado real y sale un aviso sin acción.\n//\n// La ventana de 24 h NO se comprueba aquí: lo hace IG 04 justo antes de\n// enviar. Por eso todo lo que acaba en envío lleva needsWindowCheck: true.\n//\n// Sin require: este fichero se copia dentro de un Code node de n8n.\n\nconst ACTIONS = ['approve', 'reject', 'edit'];\nconst CALLBACK_RE = /^ig:(approve|reject|edit):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;\nconst NIL_UUID = '00000000-0000-0000-0000-000000000000';\nconst CALLBACK_MAX_BYTES = 64;\nconst DM_MAX_BYTES = 1000;\n\nfunction utf8Bytes(value) {\n  let bytes = 0;\n  for (const ch of String(value ?? '')) {\n    const cp = ch.codePointAt(0);\n    bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;\n  }\n  return bytes;\n}\n\nfunction idList(value) {\n  return String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);\n}\n\nconst NUMERIC_ID = /^-?\\d{1,20}$/;\n\n// Autorizado = el chat es el configurado (número; «cambia-esto» o vacío no\n// autoriza a nadie) Y, si hay telegram_user_ids, quien pulsa está en la lista.\n// Una lista con entradas que no son números no se ignora: no autoriza a nadie.\nfunction isAuthorized(chatId, fromId, cfg) {\n  const config = cfg || {};\n  const ownerChat = String(config.telegram_chat_id ?? '').trim();\n  if (!NUMERIC_ID.test(ownerChat)) return false;\n  const chat = String(chatId ?? '').trim();\n  if (!chat || chat !== ownerChat) return false;\n  const users = idList(config.telegram_user_ids);\n  if (users.length === 0) return true;\n  if (users.some((user) => !NUMERIC_ID.test(user))) return false;\n  const from = String(fromId ?? '').trim();\n  return Boolean(from) && users.includes(from);\n}\n\nfunction parseCallbackData(data) {\n  if (typeof data !== 'string' || utf8Bytes(data) > CALLBACK_MAX_BYTES) return null;\n  const match = data.match(CALLBACK_RE);\n  if (!match || match[2] === NIL_UUID) return null;\n  return { action: match[1], igMessageId: match[2] };\n}\n\n// callback_data de los botones: 'ig:<acción>:<uuid>' (47 bytes, límite 64).\nfunction buildCallbackData(action, igMessageId) {\n  const data = 'ig:' + action + ':' + String(igMessageId ?? '').toLowerCase();\n  return parseCallbackData(data) ? data : '';\n}\n\n// update de Telegram → { kind, action, igMessageId, text, chatId, fromId,\n// messageId, callbackId, replyTo, reason }.\n// kind: 'button' | 'text' | 'foreign' (no autorizado) | 'ignore'.\nfunction parseUpdate(update, cfg) {\n  const base = {\n    kind: 'ignore', action: '', igMessageId: '', text: '', chatId: '', fromId: '',\n    messageId: '', callbackId: '', replyTo: '', reason: '',\n  };\n  if (!update || typeof update !== 'object') return { ...base, reason: 'sin_update' };\n\n  if (update.callback_query && typeof update.callback_query === 'object') {\n    const query = update.callback_query;\n    const message = query.message || {};\n    const item = {\n      ...base,\n      chatId: message.chat && message.chat.id !== undefined ? String(message.chat.id) : '',\n      fromId: query.from && query.from.id !== undefined ? String(query.from.id) : '',\n      messageId: message.message_id !== undefined ? String(message.message_id) : '',\n      callbackId: String(query.id || ''),\n    };\n    if (!isAuthorized(item.chatId, item.fromId, cfg)) return { ...item, kind: 'foreign', reason: 'no_autorizado' };\n    const parsed = parseCallbackData(query.data);\n    // Se devuelve callbackId igualmente: hay que contestar al botón para que\n    // Telegram quite el reloj, aunque no se haga nada.\n    if (!parsed) return { ...item, kind: 'ignore', reason: 'callback_invalido' };\n    return { ...item, kind: 'button', action: parsed.action, igMessageId: parsed.igMessageId };\n  }\n\n  // Solo mensajes nuevos. Un mensaje editado, de canal o de un bot no cuenta.\n  const message = update.message;\n  if (!message || typeof message !== 'object') return { ...base, reason: 'tipo_no_usado' };\n  const item = {\n    ...base,\n    chatId: message.chat && message.chat.id !== undefined ? String(message.chat.id) : '',\n    fromId: message.from && message.from.id !== undefined ? String(message.from.id) : '',\n    messageId: message.message_id !== undefined ? String(message.message_id) : '',\n    replyTo: message.reply_to_message && message.reply_to_message.message_id !== undefined\n      ? String(message.reply_to_message.message_id) : '',\n  };\n  if (message.from && message.from.is_bot) return { ...item, reason: 'bot' };\n  if (!isAuthorized(item.chatId, item.fromId, cfg)) return { ...item, kind: 'foreign', reason: 'no_autorizado' };\n  if (typeof message.text !== 'string') return { ...item, reason: 'sin_texto' };\n  if (/^\\/[a-z0-9_]+(@\\w+)?(\\s|$)/i.test(message.text.trim())) return { ...item, reason: 'comando' };\n  return { ...item, kind: 'text', text: message.text };\n}\n\n// --- Matriz estado × botón ---------------------------------------------------\n\nconst NOTICES = {\n  aprobado: 'Ya está aprobado y en cola de envío. No se envía otra vez.',\n  enviando: 'Ya se está enviando. No se envía otra vez.',\n  avisando: 'Aún se está preparando este aviso. Espera un momento.',\n  respondido_auto: 'Ya se respondió solo. No se envía otra vez.',\n  respondido_manual: 'Ya se respondió. No se envía otra vez.',\n  rechazado: 'Ya estaba rechazado. No se envía nada.',\n  aprobacion_vencida: 'Venció el plazo de aprobación. No se envía nada.',\n  vencido_ventana: 'La ventana de 24 h de Instagram está cerrada: ya no se puede responder por DM.',\n  retenido_bucle: 'Retenido por el freno anti-bucles y aún sin pasar a aprobación. Este botón no envía nada.',\n};\n// Estados en los que otra ejecución está trabajando: no se tocan los botones.\nconst IN_FLIGHT = ['avisando', 'aprobado', 'enviando'];\n// Estados ya resueltos: se quitan los botones con la línea de resultado\n// (clave de resultLine en format.js).\nconst STALE_RESULTS = {\n  respondido_auto: 'ya_respondido',\n  respondido_manual: 'ya_respondido',\n  rechazado: 'ya_rechazado',\n  aprobacion_vencida: 'vencido',\n  vencido_ventana: 'vencido_ventana',\n  // Una fila retenida recibe botones cuando IG 05 la pasa a esperando_aprobacion.\n  // Si un botón la encuentra aún así, no llegó a aprobación: el botón no hace nada.\n  retenido_bucle: 'retenido',\n};\n// Estados que admiten botones.\nconst OPEN = ['esperando_aprobacion', 'esperando_edicion', 'error_envio'];\n\nfunction rowOf(state) {\n  if (state && typeof state === 'object') {\n    return {\n      exists: Boolean(state.id || state.status),\n      status: String(state.status || state.previous_status || ''),\n      blocked: Boolean(state.injection_flag || state.blocked),\n      hasFinal: String(state.final_reply || '').trim() !== '' || Boolean(state.has_final_reply),\n      hasDraft: state.has_draft !== undefined ? Boolean(state.has_draft) : String(state.draft_reply || '').trim() !== '',\n      expired: Boolean(state.expired),\n    };\n  }\n  const status = String(state || '');\n  return { exists: status !== '', status, blocked: false, hasFinal: false, hasDraft: true, expired: false };\n}\n\n// state: el estado (string) o la fila { status, injection_flag, draft_reply |\n// has_draft, final_reply | has_final_reply, expired }. action: approve|reject|edit.\n// Devuelve { apply, fromStatus, nextStatus, next, notice, result,\n// removeButtons, needsWindowCheck }.\n// apply=false → no se escribe nada en la base de datos.\nfunction callbackOutcome(state, action) {\n  const row = rowOf(state);\n  const out = (fields) => ({\n    apply: false, fromStatus: row.status, nextStatus: row.status, next: 'none', notice: '', result: '',\n    removeButtons: false, needsWindowCheck: false, ...fields,\n  });\n  if (!ACTIONS.includes(action)) return out({ notice: 'Botón desconocido. No se hace nada.' });\n  if (!row.exists) return out({ notice: 'Este mensaje ya no corresponde a ningún DM (¿borrado por retención?).', result: 'sin_fila', removeButtons: true });\n\n  const status = row.status;\n  if (OPEN.includes(status) && row.expired) {\n    return out({ notice: NOTICES.aprobacion_vencida, result: 'vencido', removeButtons: true });\n  }\n\n  if (status === 'esperando_aprobacion' || status === 'error_envio') {\n    if (action === 'approve') {\n      // Bloqueado (inyección, fuga, promesa, enlace ajeno) o sin borrador:\n      // Aprobar no tiene nada seguro que enviar. Editar y Rechazar siguen valiendo.\n      if ((row.blocked || !row.hasDraft) && !row.hasFinal) {\n        return out({ notice: row.blocked\n          ? 'Este DM está bloqueado (intentó dar órdenes, filtraba instrucciones, prometía algo o traía un enlace ajeno). No se puede aprobar: usa Editar y escribe tú la respuesta.'\n          : 'No hay borrador que enviar. Usa Editar y escribe tú la respuesta, o Rechazar.' });\n      }\n      return out({\n        apply: true, nextStatus: 'aprobado', next: 'send', result: 'enviando', removeButtons: true, needsWindowCheck: true,\n        notice: status === 'error_envio' ? 'Aprobado otra vez. Reintentando el envío.' : 'Aprobado. Enviando la respuesta.',\n      });\n    }\n    if (action === 'reject') {\n      return out({ apply: true, nextStatus: 'rechazado', next: 'reject', result: 'rechazado', removeButtons: true, notice: 'Rechazado. No se envía nada.' });\n    }\n    return out({\n      apply: true, nextStatus: 'esperando_edicion', next: 'edit', result: 'editando', removeButtons: true,\n      notice: 'Escribe ahora en este chat el texto que se enviará (máx. 1000 bytes).',\n    });\n  }\n\n  if (status === 'esperando_edicion') {\n    if (action === 'edit') return out({ notice: 'Ya estás editando: escribe el texto en este chat.' });\n    if (action === 'reject') {\n      return out({ apply: true, nextStatus: 'rechazado', next: 'reject', result: 'rechazado', removeButtons: true, notice: 'Rechazado. Se cancela la edición y no se envía nada.' });\n    }\n    // Aprobar durante la edición = enviar el borrador original, si se puede.\n    if (row.blocked || !row.hasDraft) {\n      return out({ notice: 'No hay borrador seguro que aprobar. Escribe el texto en este chat o pulsa Rechazar.' });\n    }\n    return out({\n      apply: true, nextStatus: 'aprobado', next: 'send', result: 'enviando', removeButtons: true, needsWindowCheck: true,\n      notice: 'Aprobado el borrador original. Se cancela la edición y se envía.',\n    });\n  }\n\n  const notice = NOTICES[status] || `No se puede hacer eso ahora (estado: ${status}).`;\n  if (IN_FLIGHT.includes(status)) return out({ notice });\n  if (STALE_RESULTS[status]) return out({ notice, result: STALE_RESULTS[status], removeButtons: true });\n  return out({ notice, result: 'otro' });\n}\n\n// --- Edición -----------------------------------------------------------------\n\n// Texto libre del chat autorizado mientras hay DMs en esperando_edicion.\n// pending: filas de ese chat en esperando_edicion\n//   [{ id, telegram_edit_id?, approval_due_at? }].\n// Se aplica si hay UNA sola fila viva (o si el texto responde, citándolo, al\n// mensaje de edición de una de ellas). Más de 1000 bytes: aviso y no se envía.\nfunction editOutcome(input) {\n  const args = input || {};\n  const now = args.now === undefined ? Date.now() : new Date(args.now).getTime();\n  const text = String(args.text ?? '').replace(/\\r\\n?/g, '\\n').trim();\n  const out = (fields) => ({\n    apply: false, igMessageId: '', finalReply: '', fromStatus: 'esperando_edicion', nextStatus: 'esperando_edicion',\n    notice: '', reason: '', bytes: utf8Bytes(text), needsWindowCheck: false, ...fields,\n  });\n  const alive = (Array.isArray(args.pending) ? args.pending : []).filter((row) => {\n    if (!row || !row.id) return false;\n    if (row.approval_due_at === null || row.approval_due_at === undefined || row.approval_due_at === '') return true;\n    const due = new Date(row.approval_due_at).getTime();\n    return Number.isFinite(due) && Number.isFinite(now) && due > now;\n  });\n  if (!text) return out({ reason: 'vacio', notice: 'Texto vacío: no se envía nada.' });\n  const replyTo = String(args.replyTo ?? '');\n  let target = replyTo ? alive.find((row) => String(row.telegram_edit_id ?? '') === replyTo) : null;\n  if (!target) {\n    if (alive.length === 0) return out({ reason: 'sin_edicion', notice: 'No hay ninguna respuesta esperando texto. Ese mensaje no se envía a nadie.' });\n    if (alive.length > 1) {\n      return out({ reason: 'varias_ediciones', notice: `Hay ${alive.length} respuestas esperando texto. Contesta citando el mensaje de edición de la que quieras; este texto no se envía.` });\n    }\n    target = alive[0];\n  }\n  const bytes = utf8Bytes(text);\n  if (bytes > DM_MAX_BYTES) {\n    return out({ igMessageId: String(target.id), reason: 'demasiado_largo', notice: `Tu texto ocupa ${bytes} bytes y el máximo de Instagram es ${DM_MAX_BYTES} (cada tilde o ñ cuenta 2 y cada emoji 4). No se envía: escríbelo más corto.` });\n  }\n  return out({\n    apply: true, igMessageId: String(target.id), finalReply: text, nextStatus: 'aprobado', reason: 'editado',\n    notice: 'Texto guardado. Enviando tu respuesta.', needsWindowCheck: true,\n  });\n}\n\nconst update = $('Leer update').item.json;\nconst row = $json.id ? $json : null;\nconst outcome = callbackOutcome(row, update.action);\nconst OPEN_STATES = ['esperando_aprobacion', 'esperando_edicion', 'error_envio'];\nlet from = '';\nlet to = '';\nif (outcome.apply) { from = outcome.fromStatus; to = outcome.nextStatus; }\nelse if (row && outcome.result === 'vencido' && OPEN_STATES.includes(String(row.status))) { from = String(row.status); to = 'aprobacion_vencida'; }\nreturn { json: { ...update, row: row || {}, id: row ? row.id : '', ...outcome, db: to !== '', db_from: from, db_to: to } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "678d28ee-9e66-5187-ae03-2428d221a71b",
+      "name": "Qué hacer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        200
+      ],
+      "notes": "Matriz estado × botón (telegram.js). Un plazo vencido se apunta como aprobacion_vencida."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.db }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4584748a-9745-5a9f-845d-f703d5254aff",
+      "name": "¿Aplicar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1580,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH upd AS (\n  UPDATE ig_messages m\n  SET status = $3::text,\n      telegram_edit_id = CASE WHEN $3::text = 'esperando_edicion' THEN NULL ELSE m.telegram_edit_id END\n  WHERE m.id = $1::uuid AND m.status = $2::text\n    AND $3::text IN ('aprobado', 'rechazado', 'esperando_edicion', 'aprobacion_vencida')\n    AND ($3::text = 'aprobacion_vencida' OR m.approval_due_at IS NULL OR m.approval_due_at > now())\n    AND ($3::text <> 'aprobado' OR COALESCE(m.final_reply, '') <> ''\n         OR (NOT m.injection_flag AND COALESCE(m.draft_reply, '') <> ''))\n  RETURNING m.id\n), log AS (\n  INSERT INTO ig_actions (message_id, action, detail)\n  SELECT id, 'boton', jsonb_build_object('boton', $4::text, 'de', $2::text, 'a', $3::text,\n                                         'aplicado', (SELECT count(*) FROM upd) > 0)\n  FROM ig_messages WHERE id = $1::uuid\n  RETURNING id\n)\nSELECT (SELECT id::text FROM upd) AS id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.id, $json.db_from, $json.db_to, $json.action] }}"
+        }
+      },
+      "id": "8c8d1822-b6b5-5bf0-bf4a-a6b2f08f90df",
+      "name": "Aplicar botón",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "UPDATE … WHERE status = <el de antes>. Doble clic: el segundo no toca nada.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6a5d1fd7-57d7-5646-9c83-3f7b25520991",
+      "name": "¿Aplicado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2020,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: { ...$('Qué hacer').item.json, applied: true } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "7b9c1dd5-018e-55b9-b5e9-5ac5d15b8e36",
+      "name": "Aplicado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT m.id::text AS id, m.status, m.igsid, m.username, m.text_normalized, m.category, m.confidence, m.draft_reply, m.final_reply, m.reasoning, m.reasons, m.rag_sources, m.injection_flag, m.sensitive_flag, m.telegram_chat_id, m.telegram_message_id,\n       (m.approval_due_at IS NOT NULL AND m.approval_due_at <= now()) AS expired,\n       GREATEST(m.window_expires_at, (SELECT max(o.window_expires_at) FROM ig_messages o WHERE o.igsid = m.igsid)) AS window_expires_at,\n       EXISTS (SELECT 1 FROM ig_actions a WHERE a.message_id = m.id AND a.action = 'aviso_error_envio'\n               AND a.detail->>'telegram_message_id' = m.telegram_message_id) AS on_failure_message,\n       (SELECT a.detail->>'error' FROM ig_actions a WHERE a.message_id = m.id AND a.action = 'error_envio'\n         ORDER BY a.id DESC LIMIT 1) AS last_send_error,\n       (EXISTS (SELECT 1 FROM ig_actions a WHERE a.message_id = m.id AND a.action = 'retenido_bucle')\n         OR COALESCE(m.reasons @> '[\"bucle\"]'::jsonb, false)) AS loop_hold\nFROM (SELECT 1) AS one LEFT JOIN ig_messages m ON m.id = $1::uuid",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$('Qué hacer').item.json.id] }}"
+        }
+      },
+      "id": "757c7086-a2c4-5f97-90e6-32474e4d18bc",
+      "name": "Releer fila",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2240,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Otra pulsación (u otro flujo) se adelantó: se lee el estado de verdad.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Botones y textos que llegan al bot de Telegram del episodio 4\n// (credencial «Telegram Instagram»). El estado vive en Postgres (ig_messages):\n// aquí solo se decide QUÉ transición pedir; la aplica IG 06 con\n// UPDATE … WHERE id = $1 AND status = <fromStatus>. Si ese UPDATE no toca\n// ninguna fila (doble clic, otra ejecución ganó), se vuelve a llamar a\n// callbackOutcome con el estado real y sale un aviso sin acción.\n//\n// La ventana de 24 h NO se comprueba aquí: lo hace IG 04 justo antes de\n// enviar. Por eso todo lo que acaba en envío lleva needsWindowCheck: true.\n//\n// Sin require: este fichero se copia dentro de un Code node de n8n.\n\nconst ACTIONS = ['approve', 'reject', 'edit'];\nconst CALLBACK_RE = /^ig:(approve|reject|edit):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;\nconst NIL_UUID = '00000000-0000-0000-0000-000000000000';\nconst CALLBACK_MAX_BYTES = 64;\nconst DM_MAX_BYTES = 1000;\n\nfunction utf8Bytes(value) {\n  let bytes = 0;\n  for (const ch of String(value ?? '')) {\n    const cp = ch.codePointAt(0);\n    bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;\n  }\n  return bytes;\n}\n\nfunction idList(value) {\n  return String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);\n}\n\nconst NUMERIC_ID = /^-?\\d{1,20}$/;\n\n// Autorizado = el chat es el configurado (número; «cambia-esto» o vacío no\n// autoriza a nadie) Y, si hay telegram_user_ids, quien pulsa está en la lista.\n// Una lista con entradas que no son números no se ignora: no autoriza a nadie.\nfunction isAuthorized(chatId, fromId, cfg) {\n  const config = cfg || {};\n  const ownerChat = String(config.telegram_chat_id ?? '').trim();\n  if (!NUMERIC_ID.test(ownerChat)) return false;\n  const chat = String(chatId ?? '').trim();\n  if (!chat || chat !== ownerChat) return false;\n  const users = idList(config.telegram_user_ids);\n  if (users.length === 0) return true;\n  if (users.some((user) => !NUMERIC_ID.test(user))) return false;\n  const from = String(fromId ?? '').trim();\n  return Boolean(from) && users.includes(from);\n}\n\nfunction parseCallbackData(data) {\n  if (typeof data !== 'string' || utf8Bytes(data) > CALLBACK_MAX_BYTES) return null;\n  const match = data.match(CALLBACK_RE);\n  if (!match || match[2] === NIL_UUID) return null;\n  return { action: match[1], igMessageId: match[2] };\n}\n\n// callback_data de los botones: 'ig:<acción>:<uuid>' (47 bytes, límite 64).\nfunction buildCallbackData(action, igMessageId) {\n  const data = 'ig:' + action + ':' + String(igMessageId ?? '').toLowerCase();\n  return parseCallbackData(data) ? data : '';\n}\n\n// update de Telegram → { kind, action, igMessageId, text, chatId, fromId,\n// messageId, callbackId, replyTo, reason }.\n// kind: 'button' | 'text' | 'foreign' (no autorizado) | 'ignore'.\nfunction parseUpdate(update, cfg) {\n  const base = {\n    kind: 'ignore', action: '', igMessageId: '', text: '', chatId: '', fromId: '',\n    messageId: '', callbackId: '', replyTo: '', reason: '',\n  };\n  if (!update || typeof update !== 'object') return { ...base, reason: 'sin_update' };\n\n  if (update.callback_query && typeof update.callback_query === 'object') {\n    const query = update.callback_query;\n    const message = query.message || {};\n    const item = {\n      ...base,\n      chatId: message.chat && message.chat.id !== undefined ? String(message.chat.id) : '',\n      fromId: query.from && query.from.id !== undefined ? String(query.from.id) : '',\n      messageId: message.message_id !== undefined ? String(message.message_id) : '',\n      callbackId: String(query.id || ''),\n    };\n    if (!isAuthorized(item.chatId, item.fromId, cfg)) return { ...item, kind: 'foreign', reason: 'no_autorizado' };\n    const parsed = parseCallbackData(query.data);\n    // Se devuelve callbackId igualmente: hay que contestar al botón para que\n    // Telegram quite el reloj, aunque no se haga nada.\n    if (!parsed) return { ...item, kind: 'ignore', reason: 'callback_invalido' };\n    return { ...item, kind: 'button', action: parsed.action, igMessageId: parsed.igMessageId };\n  }\n\n  // Solo mensajes nuevos. Un mensaje editado, de canal o de un bot no cuenta.\n  const message = update.message;\n  if (!message || typeof message !== 'object') return { ...base, reason: 'tipo_no_usado' };\n  const item = {\n    ...base,\n    chatId: message.chat && message.chat.id !== undefined ? String(message.chat.id) : '',\n    fromId: message.from && message.from.id !== undefined ? String(message.from.id) : '',\n    messageId: message.message_id !== undefined ? String(message.message_id) : '',\n    replyTo: message.reply_to_message && message.reply_to_message.message_id !== undefined\n      ? String(message.reply_to_message.message_id) : '',\n  };\n  if (message.from && message.from.is_bot) return { ...item, reason: 'bot' };\n  if (!isAuthorized(item.chatId, item.fromId, cfg)) return { ...item, kind: 'foreign', reason: 'no_autorizado' };\n  if (typeof message.text !== 'string') return { ...item, reason: 'sin_texto' };\n  if (/^\\/[a-z0-9_]+(@\\w+)?(\\s|$)/i.test(message.text.trim())) return { ...item, reason: 'comando' };\n  return { ...item, kind: 'text', text: message.text };\n}\n\n// --- Matriz estado × botón ---------------------------------------------------\n\nconst NOTICES = {\n  aprobado: 'Ya está aprobado y en cola de envío. No se envía otra vez.',\n  enviando: 'Ya se está enviando. No se envía otra vez.',\n  avisando: 'Aún se está preparando este aviso. Espera un momento.',\n  respondido_auto: 'Ya se respondió solo. No se envía otra vez.',\n  respondido_manual: 'Ya se respondió. No se envía otra vez.',\n  rechazado: 'Ya estaba rechazado. No se envía nada.',\n  aprobacion_vencida: 'Venció el plazo de aprobación. No se envía nada.',\n  vencido_ventana: 'La ventana de 24 h de Instagram está cerrada: ya no se puede responder por DM.',\n  retenido_bucle: 'Retenido por el freno anti-bucles y aún sin pasar a aprobación. Este botón no envía nada.',\n};\n// Estados en los que otra ejecución está trabajando: no se tocan los botones.\nconst IN_FLIGHT = ['avisando', 'aprobado', 'enviando'];\n// Estados ya resueltos: se quitan los botones con la línea de resultado\n// (clave de resultLine en format.js).\nconst STALE_RESULTS = {\n  respondido_auto: 'ya_respondido',\n  respondido_manual: 'ya_respondido',\n  rechazado: 'ya_rechazado',\n  aprobacion_vencida: 'vencido',\n  vencido_ventana: 'vencido_ventana',\n  // Una fila retenida recibe botones cuando IG 05 la pasa a esperando_aprobacion.\n  // Si un botón la encuentra aún así, no llegó a aprobación: el botón no hace nada.\n  retenido_bucle: 'retenido',\n};\n// Estados que admiten botones.\nconst OPEN = ['esperando_aprobacion', 'esperando_edicion', 'error_envio'];\n\nfunction rowOf(state) {\n  if (state && typeof state === 'object') {\n    return {\n      exists: Boolean(state.id || state.status),\n      status: String(state.status || state.previous_status || ''),\n      blocked: Boolean(state.injection_flag || state.blocked),\n      hasFinal: String(state.final_reply || '').trim() !== '' || Boolean(state.has_final_reply),\n      hasDraft: state.has_draft !== undefined ? Boolean(state.has_draft) : String(state.draft_reply || '').trim() !== '',\n      expired: Boolean(state.expired),\n    };\n  }\n  const status = String(state || '');\n  return { exists: status !== '', status, blocked: false, hasFinal: false, hasDraft: true, expired: false };\n}\n\n// state: el estado (string) o la fila { status, injection_flag, draft_reply |\n// has_draft, final_reply | has_final_reply, expired }. action: approve|reject|edit.\n// Devuelve { apply, fromStatus, nextStatus, next, notice, result,\n// removeButtons, needsWindowCheck }.\n// apply=false → no se escribe nada en la base de datos.\nfunction callbackOutcome(state, action) {\n  const row = rowOf(state);\n  const out = (fields) => ({\n    apply: false, fromStatus: row.status, nextStatus: row.status, next: 'none', notice: '', result: '',\n    removeButtons: false, needsWindowCheck: false, ...fields,\n  });\n  if (!ACTIONS.includes(action)) return out({ notice: 'Botón desconocido. No se hace nada.' });\n  if (!row.exists) return out({ notice: 'Este mensaje ya no corresponde a ningún DM (¿borrado por retención?).', result: 'sin_fila', removeButtons: true });\n\n  const status = row.status;\n  if (OPEN.includes(status) && row.expired) {\n    return out({ notice: NOTICES.aprobacion_vencida, result: 'vencido', removeButtons: true });\n  }\n\n  if (status === 'esperando_aprobacion' || status === 'error_envio') {\n    if (action === 'approve') {\n      // Bloqueado (inyección, fuga, promesa, enlace ajeno) o sin borrador:\n      // Aprobar no tiene nada seguro que enviar. Editar y Rechazar siguen valiendo.\n      if ((row.blocked || !row.hasDraft) && !row.hasFinal) {\n        return out({ notice: row.blocked\n          ? 'Este DM está bloqueado (intentó dar órdenes, filtraba instrucciones, prometía algo o traía un enlace ajeno). No se puede aprobar: usa Editar y escribe tú la respuesta.'\n          : 'No hay borrador que enviar. Usa Editar y escribe tú la respuesta, o Rechazar.' });\n      }\n      return out({\n        apply: true, nextStatus: 'aprobado', next: 'send', result: 'enviando', removeButtons: true, needsWindowCheck: true,\n        notice: status === 'error_envio' ? 'Aprobado otra vez. Reintentando el envío.' : 'Aprobado. Enviando la respuesta.',\n      });\n    }\n    if (action === 'reject') {\n      return out({ apply: true, nextStatus: 'rechazado', next: 'reject', result: 'rechazado', removeButtons: true, notice: 'Rechazado. No se envía nada.' });\n    }\n    return out({\n      apply: true, nextStatus: 'esperando_edicion', next: 'edit', result: 'editando', removeButtons: true,\n      notice: 'Escribe ahora en este chat el texto que se enviará (máx. 1000 bytes).',\n    });\n  }\n\n  if (status === 'esperando_edicion') {\n    if (action === 'edit') return out({ notice: 'Ya estás editando: escribe el texto en este chat.' });\n    if (action === 'reject') {\n      return out({ apply: true, nextStatus: 'rechazado', next: 'reject', result: 'rechazado', removeButtons: true, notice: 'Rechazado. Se cancela la edición y no se envía nada.' });\n    }\n    // Aprobar durante la edición = enviar el borrador original, si se puede.\n    if (row.blocked || !row.hasDraft) {\n      return out({ notice: 'No hay borrador seguro que aprobar. Escribe el texto en este chat o pulsa Rechazar.' });\n    }\n    return out({\n      apply: true, nextStatus: 'aprobado', next: 'send', result: 'enviando', removeButtons: true, needsWindowCheck: true,\n      notice: 'Aprobado el borrador original. Se cancela la edición y se envía.',\n    });\n  }\n\n  const notice = NOTICES[status] || `No se puede hacer eso ahora (estado: ${status}).`;\n  if (IN_FLIGHT.includes(status)) return out({ notice });\n  if (STALE_RESULTS[status]) return out({ notice, result: STALE_RESULTS[status], removeButtons: true });\n  return out({ notice, result: 'otro' });\n}\n\n// --- Edición -----------------------------------------------------------------\n\n// Texto libre del chat autorizado mientras hay DMs en esperando_edicion.\n// pending: filas de ese chat en esperando_edicion\n//   [{ id, telegram_edit_id?, approval_due_at? }].\n// Se aplica si hay UNA sola fila viva (o si el texto responde, citándolo, al\n// mensaje de edición de una de ellas). Más de 1000 bytes: aviso y no se envía.\nfunction editOutcome(input) {\n  const args = input || {};\n  const now = args.now === undefined ? Date.now() : new Date(args.now).getTime();\n  const text = String(args.text ?? '').replace(/\\r\\n?/g, '\\n').trim();\n  const out = (fields) => ({\n    apply: false, igMessageId: '', finalReply: '', fromStatus: 'esperando_edicion', nextStatus: 'esperando_edicion',\n    notice: '', reason: '', bytes: utf8Bytes(text), needsWindowCheck: false, ...fields,\n  });\n  const alive = (Array.isArray(args.pending) ? args.pending : []).filter((row) => {\n    if (!row || !row.id) return false;\n    if (row.approval_due_at === null || row.approval_due_at === undefined || row.approval_due_at === '') return true;\n    const due = new Date(row.approval_due_at).getTime();\n    return Number.isFinite(due) && Number.isFinite(now) && due > now;\n  });\n  if (!text) return out({ reason: 'vacio', notice: 'Texto vacío: no se envía nada.' });\n  const replyTo = String(args.replyTo ?? '');\n  let target = replyTo ? alive.find((row) => String(row.telegram_edit_id ?? '') === replyTo) : null;\n  if (!target) {\n    if (alive.length === 0) return out({ reason: 'sin_edicion', notice: 'No hay ninguna respuesta esperando texto. Ese mensaje no se envía a nadie.' });\n    if (alive.length > 1) {\n      return out({ reason: 'varias_ediciones', notice: `Hay ${alive.length} respuestas esperando texto. Contesta citando el mensaje de edición de la que quieras; este texto no se envía.` });\n    }\n    target = alive[0];\n  }\n  const bytes = utf8Bytes(text);\n  if (bytes > DM_MAX_BYTES) {\n    return out({ igMessageId: String(target.id), reason: 'demasiado_largo', notice: `Tu texto ocupa ${bytes} bytes y el máximo de Instagram es ${DM_MAX_BYTES} (cada tilde o ñ cuenta 2 y cada emoji 4). No se envía: escríbelo más corto.` });\n  }\n  return out({\n    apply: true, igMessageId: String(target.id), finalReply: text, nextStatus: 'aprobado', reason: 'editado',\n    notice: 'Texto guardado. Enviando tu respuesta.', needsWindowCheck: true,\n  });\n}\n\nconst what = $('Qué hacer').item.json;\nconst row = $json.id ? $json : null;\nconst again = callbackOutcome(row, what.action);\n// Solo aviso: no se aplica nada, aunque el estado nuevo admitiera el botón.\nconst notice = again.apply ? 'Otra pulsación se adelantó. Mira el mensaje y vuelve a pulsar si hace falta.' : again.notice;\nreturn { json: { ...what, row: row || {}, ...again, notice, apply: false, next: 'none', result: again.apply ? '' : again.result, removeButtons: again.apply ? false : again.removeButtons, applied: false } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "d7e2aea7-ea24-55f3-9dd7-4b9267099a48",
+      "name": "Sin cambios",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Textos que salen a Telegram. Todo lo que viene de Instagram (usuario, comentario,\n// mensaje, borrador) se escapa: el mensaje va con parse_mode HTML.\n// Forma de todos los avisos (la misma que en el agente de correo): emoji y título\n// en negrita, campos \"Etiqueta: valor\" uno por línea, bloques separados por una\n// línea en blanco, el texto largo en una cita.\n\n// Telegram corta en 4096. Los avisos se quedan en 3600 para que quepa la línea\n// de resultado que se añade al pulsar un botón (withResult).\nconst TELEGRAM_MAX = 4096;\nconst MESSAGE_MAX = 3600;\n\nfunction escapeHtml(value) {\n  return String(value ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\n// Recorta sin dejar medio emoji (un surrogate suelto lo rechaza Telegram).\nfunction cut(value, max) {\n  const text = String(value ?? '');\n  if (text.length <= max) return text;\n  let end = Math.max(0, max);\n  const code = text.charCodeAt(end - 1);\n  if (code >= 0xD800 && code <= 0xDBFF) end -= 1;\n  return text.slice(0, end);\n}\n\nfunction quote(text) {\n  return `<blockquote>${text}</blockquote>`;\n}\n\n// parts: líneas ya escapadas y, como mucho, un bloque largo\n// { raw, limit, render(textoEscapado, recortado) }. Si no cabe, se recorta solo\n// ese bloque. Cabecera y pie salen siempre enteros.\nfunction fit(parts, max = MESSAGE_MAX) {\n  const long = parts.find((part) => typeof part !== 'string');\n  const render = (raw, trimmed) => parts\n    .map((part) => (typeof part === 'string' ? part : part.render(escapeHtml(raw), trimmed)))\n    .join('\\n');\n  if (!long) return render('', false);\n  let raw = String(long.raw ?? '');\n  let trimmed = false;\n  if (long.limit && raw.length > long.limit) {\n    raw = cut(raw, long.limit).trimEnd() + ' […]';\n    trimmed = true;\n  }\n  const full = render(raw, trimmed);\n  if (full.length <= max) return full;\n  let keep = raw.length - (full.length - max) - 20;\n  while (keep > 0) {\n    const out = render(cut(raw, keep).trimEnd() + ' […]', true);\n    if (out.length <= max) return out;\n    keep -= Math.max(10, out.length - max);\n  }\n  return render('[…]', true);\n}\n\n// Hora de Madrid sin depender de ICU: UTC+1, y UTC+2 desde el último domingo\n// de marzo hasta el último de octubre (a la 01:00 UTC, regla de la UE).\nfunction lastSundayUtc(year, month) {\n  const last = new Date(Date.UTC(year, month + 1, 0));\n  return last.getUTCDate() - last.getUTCDay();\n}\n\nfunction madridLocal(date) {\n  const when = new Date(date === undefined ? Date.now() : date);\n  const year = when.getUTCFullYear();\n  const summerStart = Date.UTC(year, 2, lastSundayUtc(year, 2), 1);\n  const summerEnd = Date.UTC(year, 9, lastSundayUtc(year, 9), 1);\n  const offset = when.getTime() >= summerStart && when.getTime() < summerEnd ? 2 : 1;\n  return new Date(when.getTime() + offset * 3600000);\n}\n\nfunction pad2(value) {\n  return String(value).padStart(2, '0');\n}\n\nfunction madridTime(date) {\n  const local = madridLocal(date);\n  return pad2(local.getUTCHours()) + ':' + pad2(local.getUTCMinutes());\n}\n\n// \"10/11 18:30\", hora de Madrid. Para las ventanas, que cruzan de día.\nfunction madridStamp(date) {\n  const local = madridLocal(date);\n  return `${pad2(local.getUTCDate())}/${pad2(local.getUTCMonth() + 1)} ${madridTime(date)}`;\n}\n\nfunction validDate(value) {\n  if (value === undefined || value === null || value === '') return null;\n  const date = new Date(value);\n  return Number.isNaN(date.getTime()) ? null : date;\n}\n\n// \"@usuario_demo\" si lo conocemos; si no, el IGSID (en comentarios y mensajes\n// sin nombre de usuario). Nunca queda vacío.\nfunction userLine(row) {\n  const username = String(row.username || '').trim().replace(/^@/, '');\n  const igsid = String(row.igsid || '').trim();\n  if (username) return `Usuario: @${escapeHtml(cut(username, 80))}${igsid ? ` (<code>${escapeHtml(cut(igsid, 40))}</code>)` : ''}`;\n  return `Usuario: ${igsid ? `<code>${escapeHtml(cut(igsid, 40))}</code>` : '(desconocido)'}`;\n}\n\n// Lo que escribió el usuario. En ig_messages se guarda en text_normalized.\nfunction userText(row) {\n  return String(row.text ?? row.text_normalized ?? '').trim();\n}\n\nconst CATEGORY_LABELS = {\n  consulta_frecuente: 'consulta frecuente',\n  revision: 'revisión',\n  fuera_de_tema: 'fuera de tema',\n  sensible: 'tema sensible',\n};\n\nfunction categoryLabel(category) {\n  return CATEGORY_LABELS[category] || String(category || 'sin categoría').replace(/_/g, ' ');\n}\n\nfunction formatSources(sources) {\n  const list = Array.isArray(sources) ? sources.slice(0, 3) : [];\n  if (!list.length) return 'Sin fragmentos en la base de conocimiento.';\n  return list.map((source) => {\n    const title = cut(String(source.title || 'Documento'), 120);\n    const when = source.updated_at ? ` (${String(source.updated_at).slice(0, 10)})` : '';\n    const url = cut(String(source.canonical_url || source.url || ''), 200);\n    return `• ${title}${when}${url ? `\\n  ${url}` : ''}`;\n  }).join('\\n');\n}\n\nfunction loopHoldText(row) {\n  const minutes = Number(row && row.loop_minutes);\n  const span = Number.isFinite(minutes) && minutes > 0 ? `hace menos de ${minutes} min` : 'hace poco';\n  return `Retenido por el freno anti-bucles: a este usuario ya se le contestó automáticamente ${span}. Revísalo antes de enviar.`;\n}\nconst SENSITIVE_TEXT = 'Tema sensible: habla de precio, plazo, devolución o datos personales. Hace falta una persona.';\nconst WINDOW_RULE_TEXT = 'Instagram solo deja contestar dentro de las 24 h siguientes al último mensaje del usuario.';\n\n// El título dice por qué está bloqueado. Mandan los motivos de decide.js\n// (ig_messages.reasons); si no llegan, el principio del razonamiento, que\n// decide.js escribe con estas mismas frases. Mismo orden de prioridad que decide.js.\nconst BLOCKED_TITLES = [\n  ['inyeccion', /^El mensaje intenta dar instrucciones/, 'Bloqueado: intenta dar órdenes'],\n  ['promesa', /^El borrador prometía/, 'Bloqueado: el borrador prometía dinero o plazos'],\n  ['fuga_prompt', /^El borrador repetía instrucciones internas/, 'Bloqueado: el borrador repetía instrucciones internas'],\n  ['enlace_ajeno', /^El borrador traía un enlace/, 'Bloqueado: el borrador traía un enlace o un contacto ajeno'],\n  ['fuente_sospechosa', /^Una fuente de la base de conocimiento/, 'Bloqueado: fuente sospechosa en la base de conocimiento'],\n];\n\nfunction reasonList(value) {\n  let list = value;\n  if (typeof list === 'string') {\n    try { list = JSON.parse(list); } catch { list = []; }\n  }\n  return Array.isArray(list) ? list.map((item) => String(item)) : [];\n}\n\nfunction blockedTitle(reasoning, reasons) {\n  const codes = reasonList(reasons);\n  const byCode = BLOCKED_TITLES.find(([code]) => codes.includes(code));\n  if (byCode) return byCode[2];\n  const text = String(reasoning || '').trim();\n  const byText = BLOCKED_TITLES.find(([, regex]) => regex.test(text));\n  return byText ? byText[2] : 'Bloqueado: revísalo antes de contestar';\n}\n\n// Motivos por los que no salió solo. labels: el mapa REASONS de decide.js\n// (código → frase). Sin mapa, salen los códigos.\nfunction reasonsBlock(reasons, labels) {\n  const codes = reasonList(reasons);\n  if (!codes.length) return [];\n  const map = labels && typeof labels === 'object' ? labels : {};\n  return ['', '<b>Motivos</b>', ...codes.slice(0, 8).map((code) => `• ${escapeHtml(cut(String(map[code] || code), 200))}`)];\n}\n\n// Línea de la ventana de 24 h. Con \"now\" avisa si ya se cerró.\nfunction windowLine(row, now) {\n  const expires = validDate(row.window_expires_at);\n  if (!expires) return '';\n  if (now !== undefined && now !== null) {\n    const current = validDate(now);\n    if (current && expires.getTime() <= current.getTime()) return `⌛ La ventana de 24 h se cerró el ${madridStamp(expires)}: ya no se podrá enviar.`;\n  }\n  return `⏳ Ventana de 24 h: se cierra el ${madridStamp(expires)} (hora de Madrid).`;\n}\n\n// Fila de ig_messages -> campos de approvalMessage. La usan el flujo 05 al mandar\n// el aviso y el 04/06 al rehacerlo para quitarle los botones: sale igual.\nfunction approvalFromRow(row) {\n  let sources = Array.isArray(row.sources) ? row.sources : row.rag_sources;\n  if (typeof sources === 'string') {\n    try { sources = JSON.parse(sources); } catch { sources = []; }\n  }\n  return {\n    username: row.username,\n    igsid: row.igsid,\n    text: row.text,\n    text_normalized: row.text_normalized,\n    category: row.category,\n    confidence: row.confidence,\n    draft_reply: row.draft_reply,\n    reasoning: row.reasoning,\n    window_expires_at: row.window_expires_at,\n    loop_minutes: row.loop_minutes,\n    reasons: reasonList(row.reasons),\n    reason_labels: row.reason_labels,\n    sources: Array.isArray(sources) ? sources : [],\n    injection: row.injection === true || row.injection_flag === true,\n    sensitive: row.sensitive === true || row.sensitive_flag === true,\n    loop_hold: row.loop_hold === true,\n  };\n}\n\n// Acepta la fila de ig_messages tal cual (rag_sources, injection_flag…) o ya mapeada.\nfunction approvalMessage(input, now) {\n  const row = approvalFromRow(input || {});\n  const blocked = Boolean(row.injection);\n  const parts = blocked\n    ? [`🛑 <b>${blockedTitle(row.reasoning, row.reasons)}</b>`, userLine(row)]\n    : [\n      '📝 <b>Borrador para aprobar (Instagram)</b>',\n      userLine(row),\n      `Categoría: ${escapeHtml(categoryLabel(row.category))} · confianza ${Math.round(Number(row.confidence || 0) * 100)} %`,\n    ];\n  const window = windowLine(row, now);\n  if (window) parts.push(window);\n  const warnings = [];\n  // El flujo 04 no lo mandó solo: ese usuario ya recibió una respuesta automática hace poco.\n  if (row.loop_hold) warnings.push('🔁 ' + loopHoldText(row));\n  if (row.sensitive) warnings.push('⚠️ ' + SENSITIVE_TEXT);\n  if (warnings.length) parts.push('', ...warnings);\n  if (row.reasoning) parts.push('', `Por qué: ${escapeHtml(cut(String(row.reasoning).trim(), 300))}`);\n  parts.push(...reasonsBlock(row.reasons, row.reason_labels));\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 800));\n  if (!blocked) {\n    const draft = String(row.draft_reply || '').trim();\n    parts.push('', '<b>Borrador</b>');\n    parts.push(draft\n      ? { raw: draft, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortado para Telegram. El mensaje sale entero.</i>' : '') }\n      : '(vacío: escribe tú la respuesta con Editar)');\n  }\n  parts.push('', '<b>Fuentes</b>', escapeHtml(formatSources(row.sources)));\n  // Bloqueado = sin borrador. Lo que vea el usuario lo escribe una persona.\n  if (blocked) parts.push('', 'Sin borrador y sin botón Aprobar: escribe tú la respuesta con Editar, o Rechazar.');\n  return fit(parts);\n}\n\n// fit() admite un solo bloque largo. El texto del usuario va con este, recortado\n// a mano; el borrador o la respuesta es el bloque largo de cada aviso.\nfunction shortBlock(text, limit) {\n  const clean = String(text || '').trim();\n  return clean ? quote(escapeHtml(cut(clean, limit)) + (clean.length > limit ? ' […]' : '')) : '(sin texto)';\n}\n\n// Respuesta enviada. options.mode: 'auto' (el agente solo) o 'manual' (tú pulsaste\n// Aprobar o Editar). options.dryRun: no salió nada a Instagram.\nfunction sentNotice(row, options) {\n  const opts = options || {};\n  const auto = opts.mode === 'auto';\n  const parts = [\n    auto ? '🤖 <b>Respondido solo (Instagram)</b>' : '✅ <b>Respuesta enviada (Instagram)</b>',\n    userLine(row),\n    '',\n    '<b>Mensaje del usuario</b>',\n    shortBlock(userText(row), 600),\n    '',\n    auto ? '<b>Respuesta</b>' : '<b>Respuesta enviada</b>',\n  ];\n  const reply = String(row.final_reply || row.draft_reply || '').trim();\n  parts.push(reply\n    ? { raw: reply, limit: 1000, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortada para Telegram. Salió entera.</i>' : '') }\n    : '(sin texto)');\n  if (opts.dryRun) parts.push('', '🧪 Simulado (DRY_RUN): no se envió nada a Instagram.');\n  return fit(parts);\n}\n\n// No se envió porque pasaron 24 h desde el mensaje del usuario.\nfunction windowClosedNotice(row) {\n  const parts = ['⌛ <b>No se envió: la ventana de 24 h ya se cerró</b>', userLine(row)];\n  const expires = validDate(row.window_expires_at);\n  if (expires) parts.push(`La ventana se cerró el ${madridStamp(expires)} (hora de Madrid).`);\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 500));\n  const draft = String(row.final_reply || row.draft_reply || '').trim();\n  if (draft) parts.push('', '<b>Respuesta que no salió</b>', { raw: draft, limit: 800, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortada para Telegram.</i>' : '') });\n  parts.push('', WINDOW_RULE_TEXT + ' Si todavía merece la pena, contéstale tú desde la app de Instagram.');\n  return fit(parts);\n}\n\n// Retenido por el freno anti-bucles: pasa a aprobación en vez de salir solo.\nfunction heldNotice(row) {\n  const parts = ['🔁 <b>Retenido por el freno anti-bucles</b>', userLine(row), '', loopHoldText(row)];\n  const window = windowLine(row);\n  if (window) parts.push(window);\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 500));\n  return fit(parts);\n}\n\nconst COMMENT_ERROR_HINTS = {\n  rate_limit: 'Es un límite de Meta. Se reintenta solo, cada vez más espaciado, mientras el comentario tenga menos de 7 días.',\n  window_closed: 'La ventana para contestar se cerró. No se reintenta.',\n  invalid_comment: 'Meta no acepta ese comentario para respuesta privada (ya tenía una, pasaron 7 días o no es válido). No se reintenta.',\n  permission: 'Falta un permiso o la cuenta tiene desactivado el acceso a mensajes. Revisa la app de Meta.',\n  token: 'El token de Meta ya no vale. Genera uno nuevo y actualiza la credencial «Instagram Token».',\n  not_found: 'Meta no encuentra ese ID o el token no lo ve. Revisa el ID de la cuenta y los permisos.',\n  blocked: 'Esa persona no está disponible o te ha bloqueado. No se reintenta.',\n  transient: 'Error temporal de Meta. Se reintenta solo.',\n};\n\n// Un comentario que no se pudo contestar. error: lo que devuelve classifyError\n// (o un texto suelto). row: { comment_id, username, igsid, text, keyword, attempts, id }.\nfunction commentErrorNotice(row, error) {\n  const detail = error && typeof error === 'object' ? error : { message: error };\n  const parts = ['⚠️ <b>Error con un comentario</b>', userLine(row)];\n  if (row.keyword) parts.push(`Palabra clave: ${escapeHtml(cut(String(row.keyword), 80))}`);\n  if (row.comment_id) parts.push(`Comentario: <code>${escapeHtml(cut(String(row.comment_id), 60))}</code>`);\n  if (row.attempts) parts.push(`Intentos: ${escapeHtml(String(row.attempts))}`);\n  parts.push('', shortBlock(row.text, 300));\n  const codes = detail.code ? ` (código ${escapeHtml(String(detail.code))}${detail.subcode ? `/${escapeHtml(String(detail.subcode))}` : ''})` : '';\n  parts.push('', `Error${codes}: <code>${escapeHtml(cut(String(detail.message || 'sin detalle').replace(/\\s+/g, ' ').trim(), 400))}</code>`);\n  const hint = COMMENT_ERROR_HINTS[detail.kind];\n  if (hint) parts.push('', `<b>Qué hacer:</b> ${escapeHtml(hint)}`);\n  return fit(parts);\n}\n\n// Aviso genérico de fallo. Corto y sin el texto del usuario.\nfunction failureMessage(what, row, error) {\n  const parts = [`⚠️ <b>Fallo: ${escapeHtml(cut(String(what), 200))}</b>`];\n  if (row && (row.username || row.igsid)) parts.push(userLine(row));\n  if (row && row.id) parts.push(`Fila: <code>${escapeHtml(row.id)}</code>`);\n  parts.push(`Error: <code>${escapeHtml(cut(String(error || 'sin detalle'), 500))}</code>`);\n  if (row && row.hint) parts.push('', `<b>Qué hacer:</b> ${escapeHtml(cut(String(row.hint), 1200))}`);\n  return fit(parts);\n}\n\nconst SEND_FAILURE_HINT = 'Queda en error_envio. Reintentar lo manda otra vez (tu texto si lo editaste), siempre que la ventana de 24 h siga abierta. Si nadie pulsa, vence como una aprobación.';\n\nfunction sendFailureMessage(row, error) {\n  return failureMessage('no se pudo enviar el mensaje', { ...row, hint: SEND_FAILURE_HINT }, error);\n}\n\n// Resumen diario. Secciones; las líneas a 0 no salen, salvo las importantes.\n// counts (los rellena la consulta del flujo 07; ausentes = 0):\n//   keyword_comments   comentarios con palabra clave\n//   private_sent       respuestas privadas enviadas\n//   auto_replied       mensajes contestados solos\n//   approved           mensajes aprobados por ti (Aprobar o Editar)\n//   rejected           rechazados por ti\n//   expired_approvals  aprobaciones vencidas\n//   expired_windows    ventanas de 24 h vencidas (no se envió)\n//   blocked_injection  bloqueados por inyección\n//   blocked_sensitive  retenidos por tema sensible\n//   blocked_loop       retenidos por el freno anti-bucles\n//   errors             con error\n//   waiting            esperando aprobación\n//   stuck              atascados más de 1 h\n//   purged             borrados por retención\nfunction summaryMessage(counts) {\n  const data = counts || {};\n  const n = (key) => (Number.isFinite(Number(data[key])) ? Math.max(0, Math.trunc(Number(data[key]))) : 0);\n  const section = (title, rows) => {\n    const shown = rows.filter(([, value, always]) => always || value > 0);\n    return shown.length ? ['', `<b>${title}</b>`, ...shown.map(([label, value]) => `${label}: ${value}`)] : [];\n  };\n  const expired = n('expired_approvals') + n('expired_windows');\n  const blocked = n('blocked_injection') + n('blocked_sensitive') + n('blocked_loop');\n  const blockedDetail = [\n    n('blocked_injection') ? `${n('blocked_injection')} inyección` : '',\n    n('blocked_sensitive') ? `${n('blocked_sensitive')} sensibles` : '',\n    n('blocked_loop') ? `${n('blocked_loop')} bucle` : '',\n  ].filter(Boolean).join(', ');\n  const expiredDetail = [\n    n('expired_approvals') ? `${n('expired_approvals')} aprobaciones` : '',\n    n('expired_windows') ? `${n('expired_windows')} ventanas de 24 h` : '',\n  ].filter(Boolean).join(', ');\n  const lines = [\n    '📊 <b>Resumen de ayer · Instagram</b>',\n    ...section('Comentarios', [\n      ['Con palabra clave', n('keyword_comments')],\n      ['Privados enviados', n('private_sent')],\n    ]),\n    ...section('Mensajes directos', [\n      ['Contestados solos', n('auto_replied')],\n      ['Aprobados por ti', n('approved')],\n      ['Rechazados por ti', n('rejected')],\n    ]),\n    ...section('Pendiente de ti', [\n      ['Esperando aprobación', n('waiting'), true],\n    ]),\n    ...section('Sin enviar', [\n      [`Vencidos${expiredDetail ? ` (${expiredDetail})` : ''}`, expired],\n      [`Bloqueados${blockedDetail ? ` (${blockedDetail})` : ''}`, blocked],\n    ]),\n    ...section('Problemas', [\n      ['Con error (míralos)', n('errors'), true],\n      ['Atascados más de 1 h', n('stuck')],\n    ]),\n  ];\n  if (n('purged')) lines.push('', `Borrados por retención: ${n('purged')}`);\n  const plural = (value, one, many) => `${value} ${value === 1 ? one : many}`;\n  const todo = [\n    n('waiting') ? `${n('waiting')} por aprobar` : '',\n    n('errors') ? `${n('errors')} con error` : '',\n    n('stuck') ? plural(n('stuck'), 'atascado', 'atascados') : '',\n    expired ? plural(expired, 'vencido', 'vencidos') : '',\n  ].filter(Boolean);\n  lines.push('', todo.length ? `👉 Te toca: ${todo.join(', ')}.` : '✅ Nada pendiente de ti.');\n  return lines.join('\\n');\n}\n\n// Línea que se añade al mensaje con botones cuando se decide. telegram.js dice\n// qué pasó (la clave); aquí está cómo se lee.\nconst RESULTS = {\n  enviando: '⏳ Aprobado. Enviando…',\n  enviado: '✅ Aprobado y enviado',\n  enviado_editado: '✅ Enviado con tu texto',\n  rechazado: '❌ Rechazado',\n  editando: '✏️ Editando: escribe en este chat el texto que se enviará',\n  fallo_envio: '⚠️ Falló el envío',\n  fallo_04: '⚠️ Falló el envío: el flujo IG 04 no recibió la petición',\n  ya_respondido: '✅ Ya estaba respondido. No se envía otra vez.',\n  ya_rechazado: '❌ Ya estaba rechazado. No se envía nada.',\n  vencido: '⌛ Venció el plazo de aprobación. No se envía nada.',\n  vencido_ventana: '⌛ No se envió: la ventana de 24 h ya se cerró',\n  retenido: '🔁 Retenido por el freno anti-bucles y aún sin pasar a aprobación. Este botón no envía nada.',\n  sin_fila: 'ℹ️ Este mensaje ya no corresponde a ningún mensaje de Instagram.',\n  otro: 'ℹ️ Este botón ya no hace nada.',\n};\nconst RESULT_TAILS = {\n  fallo_envio: 'Tienes Reintentar en el aviso de abajo.',\n  fallo_04: 'Pulsa Aprobar otra vez cuando esté.',\n};\n\nfunction resultLine(kind, options = {}) {\n  let line = RESULTS[kind] || RESULTS.otro;\n  if (options.detail) line += ': ' + escapeHtml(cut(String(options.detail).replace(/\\s+/g, ' ').trim(), 200));\n  if (options.when) line += ' · ' + options.when;\n  const tail = options.tail || RESULT_TAILS[kind];\n  return tail ? `${line}. ${tail}` : line;\n}\n\nfunction withResult(base, line) {\n  return cut(`${base}\\n\\n${line}`, TELEGRAM_MAX);\n}\n\n// Un botón de un mensaje que ya no tiene fila: se rehace con el texto plano que\n// trae el propio botón (Telegram lo manda sin formato).\nfunction plainMessage(text) {\n  return escapeHtml(cut(String(text || '').trim(), 3000));\n}\n\n// Ayuda que manda IG 06 al pulsar Editar. Con una sola edición abierta vale\n// cualquier texto del chat; con varias, hay que responder citando este mensaje.\nfunction editHelpMessage(row) {\n  const parts = ['✏️ <b>Escribe la respuesta</b>', userLine(row || {})];\n  const window = windowLine(row || {});\n  if (window) parts.push(window);\n  parts.push(\n    '',\n    'Manda en este chat el texto exacto que recibirá por DM (máx. 1000 bytes: cada tilde o ñ cuenta 2 y cada emoji 4).',\n    'Si tienes varias ediciones abiertas, responde citando este mensaje.',\n  );\n  return fit(parts);\n}\n\n'use strict';\n\n// Capa 3 y ruta de un DM. La decisión final no se fía del modelo.\n//\n// route:\n//   'auto'     → IG 04 lo envía solo. Exige que se cumpla TODO (ver decide()).\n//   'approval' → IG 05 lo manda a Telegram con Aprobar/Editar/Rechazar.\n//   'ignore'   → no se contesta (ventana de 24 h cerrada, sin texto o spam).\n// reasons: motivos fijos de por qué NO es 'auto' (ver REASONS). Vacío = auto.\n//\n// Un borrador \"bloqueado\" (inyección, fuga del prompt, promesa de dinero o\n// plazos, enlace ajeno, fuente envenenada o JSON roto) se tira: draft = '' y\n// injection = true, igual que en el episodio 3. En Telegram, Aprobar no envía\n// nada si no hay texto: solo sale lo que escriba una persona con Editar.\n//\n// Sin require: este fichero se copia dentro de un Code node de n8n.\n\nconst CATEGORIES = ['consulta_frecuente', 'fuera_de_base', 'sensible', 'queja', 'saludo', 'spam'];\nconst KEYS = ['category', 'confidence', 'draft_reply', 'reasoning'];\n\n// Motivos fijos (código → texto para el aviso de Telegram).\nconst REASONS = {\n  ventana_cerrada: 'La ventana de 24 h de Instagram está cerrada (o no se conoce): ya no se puede responder por DM.',\n  sin_texto: 'El mensaje no trae texto (solo adjuntos o emoji).',\n  spam: 'El modelo lo clasificó como spam.',\n  json_invalido: 'El modelo no devolvió un JSON válido con el esquema exacto.',\n  inyeccion: 'El mensaje intenta dar instrucciones al sistema (inyección de prompt).',\n  fuente_sospechosa: 'Una fuente del RAG contiene instrucciones o marcas: posible fuente envenenada.',\n  categoria: 'La categoría no es consulta_frecuente.',\n  sensible: 'Toca un tema sensible (precios, contratos, devoluciones, datos personales…).',\n  confianza_baja: 'La confianza del modelo está por debajo del umbral.',\n  rag_bajo: 'No hay fuentes o la mejor fuente puntúa por debajo de min_rag_score.',\n  no_cubre: 'Las fuentes no cubren las palabras de la pregunta.',\n  sin_borrador: 'No hay borrador.',\n  promesa: 'El borrador promete dinero, descuentos o plazos que no están en las fuentes.',\n  fuga_prompt: 'El borrador repite instrucciones internas o marcas del prompt.',\n  enlace_ajeno: 'El borrador trae un enlace, dominio, correo, @usuario o teléfono que no está en las fuentes.',\n  formato: 'El borrador trae markdown o HTML (en un DM se vería tal cual).',\n  borrador_largo: 'El borrador pasa de 1000 bytes UTF-8 (límite de Instagram).',\n  bucle: 'Freno anti-bucles: ya hubo una respuesta automática a esta persona hace poco.',\n};\n\nconst DEFAULT_SENSITIVE = 'precio,precios,cuanto cuesta,cuánto cuesta,tarifa,tarifas,presupuesto,descuento,oferta,contrato,legal,devolucion,devolución,reembolso,garantia,garantía,factura,dni,iban,tarjeta,telefono,teléfono,direccion,dirección,datos personales,contraseña,password';\nconst MAX_BYTES = 1000;\nconst HOUR = 3600 * 1000;\nconst MAX_WINDOW_HOURS = 24;\n// Tolerancia de reloj: una ventana que acaba más allá de 24 h + 5 min es un dato roto.\nconst SKEW_MS = 5 * 60 * 1000;\n\n// --- Utilidades --------------------------------------------------------------\n\nfunction normalize(value) {\n  return String(value ?? '').normalize('NFKC').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036F]/g, '');\n}\n\nfunction utf8Bytes(value) {\n  let bytes = 0;\n  for (const ch of String(value ?? '')) {\n    const cp = ch.codePointAt(0);\n    if (cp < 0x80) bytes += 1;\n    else if (cp < 0x800) bytes += 2;\n    else if (cp < 0x10000) bytes += 3;\n    else bytes += 4;\n  }\n  return bytes;\n}\n\nfunction escapeRegex(text) {\n  return text.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n}\n\n// Instante en ms. Acepta Date, número (ms; o segundos si es < 1e11) o texto ISO.\n// Un ISO sin zona horaria se toma como UTC. Lo que no se entiende → NaN.\nfunction toMs(value) {\n  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return NaN;\n  if (value instanceof Date) return value.getTime();\n  if (typeof value === 'number') {\n    if (!Number.isFinite(value)) return NaN;\n    return Math.abs(value) < 1e11 ? value * 1000 : value;\n  }\n  if (typeof value === 'string') {\n    const text = value.trim();\n    if (/^\\d+(\\.\\d+)?$/.test(text)) return toMs(Number(text));\n    if (!/^\\d{4}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?)?(Z|[+-]\\d{2}(:?\\d{2})?)?$/i.test(text)) return NaN;\n    const withZone = /[T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?$/.test(text) ? text.replace(' ', 'T') + 'Z' : text.replace(' ', 'T');\n    return Date.parse(withZone);\n  }\n  return NaN;\n}\n\nfunction nowMs(now) {\n  return now === undefined ? Date.now() : toMs(now);\n}\n\n// --- Ventana de 24 h ---------------------------------------------------------\n\n// Fin de la ventana a partir del momento del mensaje del usuario. Nunca más de\n// 24 h: no se usa human_agent ni la ventana de 7 días de Click-to-Direct.\nfunction windowExpiry(tsIso, hours) {\n  const start = toMs(tsIso);\n  if (!Number.isFinite(start)) return null;\n  let h = Number(hours);\n  if (!Number.isFinite(h) || h <= 0) h = MAX_WINDOW_HOURS;\n  h = Math.min(h, MAX_WINDOW_HOURS);\n  const end = new Date(start + h * HOUR);\n  return Number.isNaN(end.getTime()) ? null : end.toISOString();\n}\n\n// Abierta solo si expiresAt > now (estricto). Nulo, NaN, ilegible o una\n// ventana que acaba más allá de 24 h desde ahora → cerrada, por seguridad.\nfunction isWindowOpen(expiresAt, now) {\n  const end = toMs(expiresAt);\n  const current = nowMs(now);\n  if (!Number.isFinite(end) || !Number.isFinite(current)) return false;\n  if (end - current > MAX_WINDOW_HOURS * HOUR + SKEW_MS) return false;\n  return end > current;\n}\n\n// Freno anti-bucles: true si la última respuesta automática a esta persona\n// fue hace menos de loop_minutes. En el límite exacto ya no frena.\n// Un lastAutoAt ilegible o en el futuro frena (por seguridad).\nfunction isLoopHeld(lastAutoAt, now, minutes) {\n  if (lastAutoAt === null || lastAutoAt === undefined || lastAutoAt === '') return false;\n  const last = toMs(lastAutoAt);\n  const current = nowMs(now);\n  if (!Number.isFinite(last) || !Number.isFinite(current)) return true;\n  const elapsed = current - last;\n  if (elapsed < 0) return true;\n  return elapsed < minutes * 60 * 1000;\n}\n\n// --- Salida del modelo -------------------------------------------------------\n\nfunction llmText(llm) {\n  if (llm === null || llm === undefined) return null;\n  if (typeof llm === 'string') return llm;\n  if (typeof llm !== 'object') return null;\n  if (Array.isArray(llm.choices)) {\n    const message = llm.choices[0] && llm.choices[0].message;\n    return message && typeof message.content === 'string' ? message.content : null;\n  }\n  if (typeof llm.content === 'string' && !('category' in llm)) return llm.content;\n  return llm;\n}\n\n// Esquema estricto: exactamente las cuatro claves, categoría permitida,\n// confianza número (o texto numérico simple) entre 0 y 1, textos en string.\n// JSON rodeado de prosa → inválido. Se admite una sola valla ```json.\nfunction parseModelOutput(llm) {\n  let value = llmText(llm);\n  if (value === null) return { ok: false, error: 'sin_salida' };\n  if (typeof value === 'string') {\n    let raw = value.trim();\n    if (raw.length > 20000) return { ok: false, error: 'demasiado_largo' };\n    const fenced = raw.match(/^```(?:json)?\\s*\\n?([\\s\\S]*?)\\n?\\s*```$/i);\n    if (fenced) raw = fenced[1].trim();\n    try {\n      value = JSON.parse(raw);\n    } catch (error) {\n      return { ok: false, error: 'no_parsea' };\n    }\n  }\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'no_es_objeto' };\n  const keys = Object.keys(value);\n  const extra = keys.filter((key) => !KEYS.includes(key));\n  if (extra.length > 0) return { ok: false, error: 'claves_extra:' + extra.slice(0, 5).join(',') };\n  const missing = KEYS.filter((key) => !keys.includes(key));\n  if (missing.length > 0) return { ok: false, error: 'faltan:' + missing.join(',') };\n  if (typeof value.category !== 'string' || !CATEGORIES.includes(value.category.trim())) return { ok: false, error: 'categoria' };\n  let confidence = value.confidence;\n  if (typeof confidence === 'string' && /^\\s*(0(\\.\\d{1,6})?|1(\\.0{1,6})?|\\.\\d{1,6})\\s*$/.test(confidence)) confidence = Number(confidence);\n  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) return { ok: false, error: 'confianza' };\n  if (typeof value.draft_reply !== 'string') return { ok: false, error: 'draft_reply' };\n  if (typeof value.reasoning !== 'string') return { ok: false, error: 'reasoning' };\n  return {\n    ok: true,\n    value: {\n      category: value.category.trim(),\n      confidence,\n      // Como en el ep3: tope de 4000 caracteres (lo que pase de 1000 bytes ya va a aprobación).\n      draft: Array.from(value.draft_reply.trim()).slice(0, 4000).join(''),\n      reasoning: value.reasoning.trim().slice(0, 1000),\n    },\n  };\n}\n\n// --- Comprobaciones del borrador y de las fuentes ----------------------------\n\nfunction topicList(cfg) {\n  const configured = String((cfg && cfg.sensitive_topics) || '').trim();\n  return (configured || DEFAULT_SENSITIVE)\n    .split(',')\n    .map((item) => normalize(item).trim())\n    .filter(Boolean);\n}\n\n// Por palabra o frase, sin tildes, con plural simple (s/es).\nfunction findSensitive(text, topics) {\n  const haystack = normalize(text);\n  return topics.filter((topic) => {\n    const body = topic.split(/[^a-z0-9]+/).filter(Boolean).map(escapeRegex).join('[^a-z0-9]+');\n    if (!body) return false;\n    return new RegExp('(^|[^a-z0-9])' + body + '(s|es)?($|[^a-z0-9])').test(haystack);\n  });\n}\n\nconst REFUND_PATTERNS = [\n  /\\b(te|os|le|les) (devolvemos|devolveremos|reembolsamos|reembolsaremos|abonamos|abonaremos|regalamos|descontamos)\\b/,\n  /\\breembolso (aprobado|completo|integro|total|garantizado)\\b/,\n  /\\b(devolucion|reembolso) (garantizad[ao]|asegurad[ao])\\b/,\n  /\\b(hemos|he) (abonado|reembolsado|devuelto el dinero)\\b/,\n  /\\b(refund(ed)?|we will refund|money back|full refund)\\b/,\n];\nconst PROMISE_PATTERNS = [\n  /\\d+([.,]\\d+)?\\s?(€|eur\\b|euros?\\b|usd\\b|\\$|dolares\\b|libras\\b|£)|(€|\\$|£)\\s?\\d/,\n  /\\b\\d{1,3}\\s?%\\s?(de )?(descuento|dto|off)\\b|\\b(descuento|rebaja|oferta) del? \\d/,\n  /\\b(en|dentro de|antes de) (menos de )?(\\d+|un|una|dos|tres|cuatro|cinco|seis|siete) (minutos|horas|h|dias|dias habiles|dias laborables|semanas|meses)\\b/,\n  /\\b(te|os|le|les) (lo |la |los |las )?(enviamos|enviaremos|mandamos|mandaremos|entregamos|entregaremos|llegara|llegaran|tendras|tendreis) (manana|hoy|esta semana|en \\d+)/,\n  /\\b(garantizamos|te garantizo|os garantizamos|te aseguro|os aseguro|te prometo|prometemos|aseguramos|we guarantee|we promise|i promise)\\b/,\n  /\\b(within|in) (\\d+|one|two|three) (hours|days|weeks)\\b/,\n  /\\bplazo (de|maximo de) \\d+/,\n];\n\n// Promesas de dinero o plazos. Un reembolso nunca se permite; el resto solo\n// si el mismo trozo aparece tal cual en las fuentes.\nfunction findPromise(draft, sourcesBlob) {\n  const text = normalize(draft);\n  if (REFUND_PATTERNS.some((regex) => regex.test(text))) return true;\n  return PROMISE_PATTERNS.some((regex) => {\n    const match = text.match(regex);\n    return Boolean(match) && !sourcesBlob.includes(match[0].trim());\n  });\n}\n\nconst LEAK_PATTERNS = [\n  /mensaje[\\s_-]*no[\\s_-]*confiable/,\n  /fuentes[\\s_-]*rag/,\n  /\\b(draft_reply|consulta_frecuente|fuera_de_base)\\b/,\n  /\"?\\b(category|confidence|reasoning)\\b\"?\\s*:/,\n  /\\b(esquema exacto|reglas del borrador|prompt de sistema|system prompt|instrucciones de sistema|instrucciones del sistema|mis instrucciones|my instructions|my system)\\b/,\n  /\\b(eres el asistente que clasifica|tu unica salida es un objeto json)\\b/,\n  /\\b(soy un modelo de lenguaje|como modelo de lenguaje|as an ai language model|i am an ai language model)\\b/,\n  /<\\s*\\/?\\s*(system|sistema|assistant|im_start|im_end)\\b|<\\|[a-z_]+\\|>/,\n];\nconst SHINGLE = 7;\n\nfunction words(text) {\n  return normalize(text).split(/[^a-z0-9]+/).filter(Boolean);\n}\n\n// Fuga del prompt: marcas, frases propias o 7 palabras seguidas del prompt de\n// sistema (cfg.prompt, el mismo texto que se manda al modelo).\nfunction leaksPrompt(draft, promptText) {\n  const text = normalize(draft);\n  if (LEAK_PATTERNS.some((regex) => regex.test(text))) return true;\n  if (!promptText) return false;\n  const promptWords = words(promptText);\n  if (promptWords.length < SHINGLE) return false;\n  const grams = new Set();\n  for (let i = 0; i + SHINGLE <= promptWords.length; i += 1) grams.add(promptWords.slice(i, i + SHINGLE).join(' '));\n  const draftWords = words(draft);\n  for (let i = 0; i + SHINGLE <= draftWords.length; i += 1) {\n    if (grams.has(draftWords.slice(i, i + SHINGLE).join(' '))) return true;\n  }\n  return false;\n}\n\nconst TLDS = 'com|es|net|org|io|co|me|ly|app|dev|info|xyz|link|site|online|shop|store|biz|eu|us|uk|de|fr|it|pt|mx|ar|cl|ai|gg|tv|to|cc|ws|click|top|live|page|tk|ml|ga|cf|gq|ru|cn|in|example|cat|gal|eus|ink|lat|pro|club|vip|work|icu|su';\nconst URL_RE = /(?:https?|hxxps?):\\/\\/[^\\s<>\"'`]+|www\\.[^\\s<>\"'`]+/giu;\nconst DOMAIN_RE = new RegExp('(?<![\\\\p{L}\\\\p{N}@.\\\\-/])(?:[\\\\p{L}\\\\p{N}](?:[\\\\p{L}\\\\p{N}-]{0,61}[\\\\p{L}\\\\p{N}])?\\\\.)+(?:' + TLDS + ')(?![\\\\p{L}\\\\p{N}-])(?:/[^\\\\s<>\"\\'`]*)?', 'giu');\nconst OBFUSCATED_RE = /[\\p{L}\\p{N}-]+\\s*(\\[\\.\\]|\\(\\.\\)|\\[punto\\]|\\(punto\\)|\\[dot\\]|\\(dot\\)|\\s+punto\\s+|\\s+dot\\s+)\\s*[a-z]{2,10}\\b/giu;\nconst EMAIL_RE = /[\\p{L}\\p{N}._%+-]+@[\\p{L}\\p{N}-]+(?:\\.[\\p{L}\\p{N}-]+)+/gu;\nconst HANDLE_RE = /(?:^|[^\\p{L}\\p{N}_@.])@([\\p{L}\\p{N}._]{2,30})/gu;\nconst PHONE_RE = /\\+?\\d[\\d ().-]{7,}\\d/g;\n\nfunction cleanLink(value) {\n  return value\n    .toLowerCase()\n    .replace(/^(?:https?|hxxps?):\\/\\//, '')\n    .replace(/^www\\./, '')\n    .replace(/[.,;:!?)\\]}»\"'’]+$/, '')\n    .replace(/\\/+$/, '');\n}\n\nfunction linksOf(text) {\n  const source = String(text ?? '').normalize('NFKC');\n  const out = { links: [], emails: [], handles: [], phones: [], obfuscated: false };\n  let rest = source;\n  for (const match of source.match(EMAIL_RE) || []) {\n    out.emails.push(match.toLowerCase());\n    rest = rest.split(match).join(' ');\n  }\n  for (const match of rest.match(URL_RE) || []) {\n    out.links.push(cleanLink(match));\n    rest = rest.split(match).join(' ');\n  }\n  for (const match of rest.match(DOMAIN_RE) || []) out.links.push(cleanLink(match));\n  for (const match of rest.matchAll(HANDLE_RE)) out.handles.push(match[1].toLowerCase().replace(/\\.+$/, ''));\n  for (const match of rest.match(PHONE_RE) || []) {\n    const digits = match.replace(/\\D/g, '');\n    if (digits.length >= 9) out.phones.push(digits);\n  }\n  out.obfuscated = OBFUSCATED_RE.test(source);\n  OBFUSCATED_RE.lastIndex = 0;\n  // Dominio con homoglifos (latín mezclado con cirílico o griego): \"exаmple\".\n  if (source.split(/\\s+/).some((token) => token.includes('.') && /\\p{Script=Latin}/u.test(token) && /[\\p{Script=Cyrillic}\\p{Script=Greek}]/u.test(token))) {\n    out.obfuscated = true;\n  }\n  return out;\n}\n\n// true si el borrador trae algo que no aparece en las fuentes.\nfunction hasForeignLinks(draft, sources) {\n  const found = linksOf(draft);\n  if (found.obfuscated) return true;\n  const allowed = { links: new Set(), hosts: new Set(), emails: new Set(), handles: new Set(), phones: new Set() };\n  for (const source of sources) {\n    const blob = [source.canonical_url, source.title, source.content].map((v) => String(v ?? '')).join('\\n');\n    const own = linksOf(blob);\n    own.links.forEach((link) => {\n      allowed.links.add(link);\n      allowed.hosts.add(link.split('/')[0]);\n    });\n    own.emails.forEach((email) => allowed.emails.add(email));\n    own.handles.forEach((handle) => allowed.handles.add(handle));\n    own.phones.forEach((phone) => allowed.phones.add(phone));\n  }\n  const linkOk = (link) => allowed.links.has(link) || (!link.includes('/') && allowed.hosts.has(link));\n  return found.links.some((link) => !linkOk(link))\n    || found.emails.some((email) => !allowed.emails.has(email))\n    || found.handles.some((handle) => !allowed.handles.has(handle))\n    || found.phones.some((phone) => !allowed.phones.has(phone));\n}\n\nconst FORMAT_PATTERNS = [\n  /\\*\\*[^*\\n]+\\*\\*/, /__[^_\\n]+__/, /(^|\\n)\\s{0,3}#{1,6}\\s/, /\\[[^\\]\\n]+\\]\\([^)\\n]+\\)/, /```|`[^`\\n]+`/, /<\\/?[a-z][^>]*>/i,\n];\n\nfunction hasFormatting(draft) {\n  return FORMAT_PATTERNS.some((regex) => regex.test(draft));\n}\n\n// Instrucciones o marcas dentro de una fuente del RAG (fuente envenenada).\nconst SOURCE_PATTERNS = [\n  /<\\s*\\/?\\s*(mensaje_no_confiable|fuentes_rag|system|sistema|assistant|asistente|im_start|im_end)\\b|<\\|[a-z_]+\\|>|\\[\\/?inst\\]/,\n  /\\b(ignora|ignore|olvida|forget|disregard|omite|override)\\b[^.\\n]{0,40}\\b(instrucciones|reglas|instructions|rules|prompt)\\b/,\n  /\\b(system prompt|prompt de sistema|you are now|ahora eres|eres ahora|actua como si|act as if|from now on|a partir de ahora (eres|responde|debes))\\b/,\n  /\\b(nota|instruccion|mensaje) para (la ia|el asistente|el modelo|el bot)\\b|\\bnote (to|for) (the )?(ai|assistant|model|bot)\\b|\\b(si eres|if you are) (una ia|un modelo|un asistente|an ai|a language model|an assistant)\\b/,\n  /\\b(responde|contesta|reply|respond|answer)\\b[^.\\n]{0,25}\\b(siempre|always)\\b[^.\\n]{0,25}\\b(con|with)\\b/,\n];\n\nfunction poisonedSources(sources) {\n  return sources.some((source) => {\n    const text = normalize([source.title, source.content].map((v) => String(v ?? '')).join('\\n'));\n    return SOURCE_PATTERNS.some((regex) => regex.test(text));\n  });\n}\n\n// Como en el episodio 3: las palabras de 5+ letras de la pregunta tienen que\n// aparecer en las dos primeras fuentes (2 aciertos, o 1 si la pregunta es corta).\nfunction coversQuestion(body, sources) {\n  const tokens = normalize(body).split(/[^a-z0-9]+/).filter((word) => word.length > 4);\n  if (tokens.length === 0) return false;\n  const blob = normalize((sources || []).slice(0, 2).map((source) => `${source.title || ''} ${source.content || ''}`).join(' '));\n  const hits = tokens.filter((word) => blob.includes(word));\n  return hits.length >= 2 || (hits.length === 1 && tokens.length <= 3);\n}\n\nfunction numberOr(value, fallback, min, max) {\n  if (value === null || value === undefined || value === '') return fallback;\n  const number = Number(value);\n  if (!Number.isFinite(number)) return fallback;\n  return Math.min(max, Math.max(min, number));\n}\n\n// --- Decisión ----------------------------------------------------------------\n\nfunction decide(input) {\n  const args = input || {};\n  const cfg = args.cfg || {};\n  const inspection = args.inspection || {};\n  // Umbral efectivo: nunca por debajo de 0,5 aunque Configuración diga otra cosa.\n  const threshold = numberOr(cfg.confidence_threshold, 0.75, 0.5, 1);\n  const minScore = numberOr(cfg.min_rag_score, 0.45, 0, 1);\n  const loopMinutes = numberOr(cfg.loop_minutes, 10, 1, 24 * 60);\n  const sources = (Array.isArray(args.sources) ? args.sources : []).filter((s) => s && typeof s === 'object');\n  let topScore = Number(args.topScore);\n  if (!Number.isFinite(topScore)) topScore = sources.length ? Math.max(...sources.map((s) => Number(s.score) || 0)) : 0;\n  const message = String(inspection.sanitized ?? '');\n  const injectionIn = Boolean(inspection.injection);\n  const windowOpen = isWindowOpen(args.window && args.window.expiresAt, args.now);\n  const loopHeld = isLoopHeld(args.lastAutoAt, args.now, loopMinutes);\n  const parsed = parseModelOutput(args.llm);\n  const model = parsed.ok ? parsed.value : { category: '', confidence: 0, draft: '', reasoning: '' };\n\n  const base = {\n    category: model.category || null,\n    confidence: model.confidence,\n    reasoning: model.reasoning,\n    windowOpen,\n    loopHeld,\n    jsonError: parsed.ok ? '' : parsed.error,\n  };\n  // El título del aviso en Telegram (format.js, blockedTitle) sale del principio\n  // del razonamiento, como en el episodio 3.\n  const why = (reasons) => {\n    if (reasons.includes('inyeccion')) return 'El mensaje intenta dar instrucciones al sistema.';\n    if (reasons.includes('promesa')) return 'El borrador prometía una devolución, un descuento o un plazo que no está en la base de conocimiento.';\n    if (reasons.includes('fuga_prompt')) return 'El borrador repetía instrucciones internas.';\n    if (reasons.includes('enlace_ajeno')) return 'El borrador traía un enlace o un contacto que no está en las fuentes.';\n    if (reasons.includes('fuente_sospechosa')) return 'Una fuente de la base de conocimiento trae instrucciones o marcas (posible fuente envenenada).';\n    return '';\n  };\n  const finish = (route, reasons, extra) => {\n    const blocked = Boolean(extra.blocked);\n    const draft = route === 'ignore' || blocked ? '' : model.draft;\n    let reasoning = model.reasoning;\n    if (!parsed.ok) reasoning = 'El modelo no devolvió JSON válido (' + parsed.error + '). Pasa a una persona.';\n    if (blocked) reasoning = (why(reasons) + ' No hay borrador: responde con Editar o rechaza. ' + reasoning).trim().slice(0, 1000);\n    return {\n      route,\n      reasons,\n      ...base,\n      reasoning,\n      draft,\n      draftBytes: utf8Bytes(draft),\n      sensitive: Boolean(extra.sensitive),\n      injection: injectionIn || blocked,\n      blocked,\n    };\n  };\n\n  // 1. Ventana cerrada: no se puede contestar. Ni borrador ni botón Aprobar.\n  //    Si además hubo inyección, se marca para que el flujo lo registre y avise.\n  if (!windowOpen) {\n    const reasons = ['ventana_cerrada'];\n    if (injectionIn) reasons.push('inyeccion');\n    return finish('ignore', reasons, { blocked: injectionIn });\n  }\n  // 2. Sin texto (y sin inyección): se ignora y se registra.\n  if (inspection.ignore && !injectionIn) return finish('ignore', ['sin_texto'], {});\n\n  const reasons = [];\n  const add = (code) => { if (!reasons.includes(code)) reasons.push(code); };\n  let blocked = false;\n  if (injectionIn) { add('inyeccion'); blocked = true; }\n  // JSON roto: sin borrador (no hay nada que aprobar), pero no \"bloqueado\".\n  if (!parsed.ok) add('json_invalido');\n\n  // 3. Spam limpio: no se contesta. Con inyección, a una persona.\n  if (parsed.ok && model.category === 'spam' && !injectionIn) return finish('ignore', ['spam'], {});\n\n  const topics = topicList(cfg);\n  // Solo mensaje y borrador, como en el ep3: la FAQ llega en un único chunk que menciona\n  // garantía, y mirar las fuentes mandaría a aprobación hasta «¿a qué hora abrís?».\n  const sensitiveHits = findSensitive([message, model.draft].join('\\n'), topics);\n  const sensitive = sensitiveHits.length > 0;\n\n  if (poisonedSources(sources)) { add('fuente_sospechosa'); blocked = true; }\n  if (parsed.ok) {\n    if (model.category !== 'consulta_frecuente') add('categoria');\n    if (sensitive) add('sensible');\n    if (model.confidence < threshold) add('confianza_baja');\n  } else if (sensitive) {\n    add('sensible');\n  }\n  if (sources.length === 0 || topScore < minScore) add('rag_bajo');\n  if (!coversQuestion(message, sources)) add('no_cubre');\n  if (parsed.ok) {\n    const sourcesBlob = normalize(sources.map((s) => `${s.title || ''}\\n${s.content || ''}`).join('\\n'));\n    if (!model.draft) add('sin_borrador');\n    else {\n      if (findPromise(model.draft, sourcesBlob)) { add('promesa'); blocked = true; }\n      if (leaksPrompt(model.draft, cfg.prompt)) { add('fuga_prompt'); blocked = true; }\n      if (hasForeignLinks(model.draft, sources)) { add('enlace_ajeno'); blocked = true; }\n      if (hasFormatting(model.draft)) add('formato');\n      if (utf8Bytes(model.draft) > MAX_BYTES) add('borrador_largo');\n    }\n  }\n  if (loopHeld) add('bucle');\n\n  return finish(reasons.length === 0 ? 'auto' : 'approval', reasons, { blocked, sensitive });\n}\n\nconst what = $json;\nconst row = what.row && what.row.id ? what.row : null;\nlet base = '';\nif (row) {\n  const full = { ...row, reason_labels: REASONS };\n  base = row.on_failure_message && row.last_send_error ? sendFailureMessage(full, row.last_send_error) : approvalMessage(full, new Date());\n}\nconst timed = ['enviando', 'rechazado'].includes(what.result);\nconst line = what.result ? resultLine(what.result, { when: timed ? madridTime(new Date()) : '' }) : '';\nconst editText = line ? (base ? withResult(base, line) : line) : '';\nconst hasMessage = String(what.chatId || '') !== '' && String(what.messageId || '') !== '';\nreturn { json: { ...what, edit: Boolean(what.removeButtons && editText && hasMessage), edit_text: editText, help_text: row ? editHelpMessage(row) : '' } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "61f299a2-61c3-5dc3-8e96-0467eedfc15b",
+      "name": "Texto del botón",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2680,
+        200
+      ],
+      "notes": "El mensaje se rehace desde la fila, sin botones y con la línea de lo que pasó."
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.callbackId }}",
+        "additionalFields": {
+          "text": "={{ $json.notice }}",
+          "show_alert": "={{ $json.next === 'none' }}"
+        }
+      },
+      "id": "89442a25-cacc-5b4f-9f5e-6a92adae21f0",
+      "name": "Responder botón",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2900,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "notes": "Quita el reloj del botón y dice qué ha pasado. Si no hay nada que hacer, sale como alerta. Con ids falsos (pruebas) falla sin parar.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Texto del botón').item.json.edit }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c5f57fca-4746-58eb-8ee3-3e171af896d9",
+      "name": "¿Quitar botones?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3120,
+        200
+      ],
+      "notes": "Las dos salidas siguen."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "editMessageText",
+        "messageType": "message",
+        "chatId": "={{ $('Texto del botón').item.json.chatId }}",
+        "messageId": "={{ $('Texto del botón').item.json.messageId }}",
+        "text": "={{ $('Texto del botón').item.json.edit_text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {},
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "ae641f80-f4ad-51d8-ae46-a87f43f97588",
+      "name": "Quitar botones",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3340,
+        100
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "notes": "Mismo texto, sin botones y con lo que pasó. La línea final («✅ Aprobado y enviado») la pone IG 04 al enviar.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Texto del botón').item.json.next }}",
+              "rightValue": "send",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3f81ba9c-d9d9-55ba-ba98-6819cbbae04b",
+      "name": "¿Enviar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3560,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuración').first().json.n8n_url.replace(/\\/$/, '') + '/webhook/ig-send' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message_id: $('Texto del botón').item.json.id, mode: 'manual' }) }}",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "1632c456-3691-508a-83d3-c8d5afffbe03",
+      "name": "Pedir envío",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3780,
+        100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "IG 04 manda el borrador (o tu texto) si la ventana sigue abierta.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.error;\nreturn { json: { id: $('Texto del botón').item.json.id, fallo: String(typeof raw === 'string' ? raw : (raw && (raw.message || raw.description)) || JSON.stringify(raw || 'sin detalle')).slice(0, 400) } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "c0895e93-6e6f-5eed-a309-7ee9a8afff16",
+      "name": "Fallo envío",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Texto del botón').item.json.next }}",
+              "rightValue": "edit",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1d933a6-18e8-5f6d-8b71-2d29f17c8a38",
+      "name": "¿Editar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Texto del botón').item.json.chatId }}",
+        "text": "={{ $('Texto del botón').item.json.help_text }}",
+        "replyMarkup": "forceReply",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false,
+          "disable_web_page_preview": true,
+          "reply_to_message_id": "={{ $('Texto del botón').item.json.messageId }}"
+        },
+        "forceReply": {
+          "force_reply": true
+        }
+      },
+      "id": "0290827b-6139-5a82-9a7e-0dc51935a86d",
+      "name": "Pedir texto",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4000,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "notes": "No espera: el texto lo coge este mismo flujo como otro update. forceReply para que responder sea fácil.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE ig_messages SET telegram_edit_id = $2\nWHERE id = $1::uuid AND status = 'esperando_edicion' AND $2::text <> ''\nRETURNING id::text",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$('Texto del botón').item.json.id, $json.result && $json.result.message_id !== undefined ? String($json.result.message_id) : ''] }}"
+        }
+      },
+      "id": "06fb92f2-0909-5d44-8b03-21a29d72a121",
+      "name": "Guardar edición",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4220,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Recuerda el mensaje de ayuda: con varias ediciones abiertas, hay que responder citándolo.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.kind }}",
+              "rightValue": "text",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "60795cbb-58a5-5c69-8b3d-e37a05b8fdb7",
+      "name": "¿Texto?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1140,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE(json_agg(json_build_object(\n         'id', id::text, 'telegram_edit_id', telegram_edit_id, 'approval_due_at', to_char((approval_due_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))\n         ORDER BY updated_at DESC), '[]'::json) AS pending\nFROM ig_messages\nWHERE status = 'esperando_edicion'",
+        "options": {
+          "queryBatching": "independently"
+        }
+      },
+      "id": "9107ea82-6f1d-5ed5-8826-b69949c3820a",
+      "name": "Ediciones pendientes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1360,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Todas las filas en esperando_edicion (solo hay un chat autorizado).",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Botones y textos que llegan al bot de Telegram del episodio 4\n// (credencial «Telegram Instagram»). El estado vive en Postgres (ig_messages):\n// aquí solo se decide QUÉ transición pedir; la aplica IG 06 con\n// UPDATE … WHERE id = $1 AND status = <fromStatus>. Si ese UPDATE no toca\n// ninguna fila (doble clic, otra ejecución ganó), se vuelve a llamar a\n// callbackOutcome con el estado real y sale un aviso sin acción.\n//\n// La ventana de 24 h NO se comprueba aquí: lo hace IG 04 justo antes de\n// enviar. Por eso todo lo que acaba en envío lleva needsWindowCheck: true.\n//\n// Sin require: este fichero se copia dentro de un Code node de n8n.\n\nconst ACTIONS = ['approve', 'reject', 'edit'];\nconst CALLBACK_RE = /^ig:(approve|reject|edit):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;\nconst NIL_UUID = '00000000-0000-0000-0000-000000000000';\nconst CALLBACK_MAX_BYTES = 64;\nconst DM_MAX_BYTES = 1000;\n\nfunction utf8Bytes(value) {\n  let bytes = 0;\n  for (const ch of String(value ?? '')) {\n    const cp = ch.codePointAt(0);\n    bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;\n  }\n  return bytes;\n}\n\nfunction idList(value) {\n  return String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);\n}\n\nconst NUMERIC_ID = /^-?\\d{1,20}$/;\n\n// Autorizado = el chat es el configurado (número; «cambia-esto» o vacío no\n// autoriza a nadie) Y, si hay telegram_user_ids, quien pulsa está en la lista.\n// Una lista con entradas que no son números no se ignora: no autoriza a nadie.\nfunction isAuthorized(chatId, fromId, cfg) {\n  const config = cfg || {};\n  const ownerChat = String(config.telegram_chat_id ?? '').trim();\n  if (!NUMERIC_ID.test(ownerChat)) return false;\n  const chat = String(chatId ?? '').trim();\n  if (!chat || chat !== ownerChat) return false;\n  const users = idList(config.telegram_user_ids);\n  if (users.length === 0) return true;\n  if (users.some((user) => !NUMERIC_ID.test(user))) return false;\n  const from = String(fromId ?? '').trim();\n  return Boolean(from) && users.includes(from);\n}\n\nfunction parseCallbackData(data) {\n  if (typeof data !== 'string' || utf8Bytes(data) > CALLBACK_MAX_BYTES) return null;\n  const match = data.match(CALLBACK_RE);\n  if (!match || match[2] === NIL_UUID) return null;\n  return { action: match[1], igMessageId: match[2] };\n}\n\n// callback_data de los botones: 'ig:<acción>:<uuid>' (47 bytes, límite 64).\nfunction buildCallbackData(action, igMessageId) {\n  const data = 'ig:' + action + ':' + String(igMessageId ?? '').toLowerCase();\n  return parseCallbackData(data) ? data : '';\n}\n\n// update de Telegram → { kind, action, igMessageId, text, chatId, fromId,\n// messageId, callbackId, replyTo, reason }.\n// kind: 'button' | 'text' | 'foreign' (no autorizado) | 'ignore'.\nfunction parseUpdate(update, cfg) {\n  const base = {\n    kind: 'ignore', action: '', igMessageId: '', text: '', chatId: '', fromId: '',\n    messageId: '', callbackId: '', replyTo: '', reason: '',\n  };\n  if (!update || typeof update !== 'object') return { ...base, reason: 'sin_update' };\n\n  if (update.callback_query && typeof update.callback_query === 'object') {\n    const query = update.callback_query;\n    const message = query.message || {};\n    const item = {\n      ...base,\n      chatId: message.chat && message.chat.id !== undefined ? String(message.chat.id) : '',\n      fromId: query.from && query.from.id !== undefined ? String(query.from.id) : '',\n      messageId: message.message_id !== undefined ? String(message.message_id) : '',\n      callbackId: String(query.id || ''),\n    };\n    if (!isAuthorized(item.chatId, item.fromId, cfg)) return { ...item, kind: 'foreign', reason: 'no_autorizado' };\n    const parsed = parseCallbackData(query.data);\n    // Se devuelve callbackId igualmente: hay que contestar al botón para que\n    // Telegram quite el reloj, aunque no se haga nada.\n    if (!parsed) return { ...item, kind: 'ignore', reason: 'callback_invalido' };\n    return { ...item, kind: 'button', action: parsed.action, igMessageId: parsed.igMessageId };\n  }\n\n  // Solo mensajes nuevos. Un mensaje editado, de canal o de un bot no cuenta.\n  const message = update.message;\n  if (!message || typeof message !== 'object') return { ...base, reason: 'tipo_no_usado' };\n  const item = {\n    ...base,\n    chatId: message.chat && message.chat.id !== undefined ? String(message.chat.id) : '',\n    fromId: message.from && message.from.id !== undefined ? String(message.from.id) : '',\n    messageId: message.message_id !== undefined ? String(message.message_id) : '',\n    replyTo: message.reply_to_message && message.reply_to_message.message_id !== undefined\n      ? String(message.reply_to_message.message_id) : '',\n  };\n  if (message.from && message.from.is_bot) return { ...item, reason: 'bot' };\n  if (!isAuthorized(item.chatId, item.fromId, cfg)) return { ...item, kind: 'foreign', reason: 'no_autorizado' };\n  if (typeof message.text !== 'string') return { ...item, reason: 'sin_texto' };\n  if (/^\\/[a-z0-9_]+(@\\w+)?(\\s|$)/i.test(message.text.trim())) return { ...item, reason: 'comando' };\n  return { ...item, kind: 'text', text: message.text };\n}\n\n// --- Matriz estado × botón ---------------------------------------------------\n\nconst NOTICES = {\n  aprobado: 'Ya está aprobado y en cola de envío. No se envía otra vez.',\n  enviando: 'Ya se está enviando. No se envía otra vez.',\n  avisando: 'Aún se está preparando este aviso. Espera un momento.',\n  respondido_auto: 'Ya se respondió solo. No se envía otra vez.',\n  respondido_manual: 'Ya se respondió. No se envía otra vez.',\n  rechazado: 'Ya estaba rechazado. No se envía nada.',\n  aprobacion_vencida: 'Venció el plazo de aprobación. No se envía nada.',\n  vencido_ventana: 'La ventana de 24 h de Instagram está cerrada: ya no se puede responder por DM.',\n  retenido_bucle: 'Retenido por el freno anti-bucles y aún sin pasar a aprobación. Este botón no envía nada.',\n};\n// Estados en los que otra ejecución está trabajando: no se tocan los botones.\nconst IN_FLIGHT = ['avisando', 'aprobado', 'enviando'];\n// Estados ya resueltos: se quitan los botones con la línea de resultado\n// (clave de resultLine en format.js).\nconst STALE_RESULTS = {\n  respondido_auto: 'ya_respondido',\n  respondido_manual: 'ya_respondido',\n  rechazado: 'ya_rechazado',\n  aprobacion_vencida: 'vencido',\n  vencido_ventana: 'vencido_ventana',\n  // Una fila retenida recibe botones cuando IG 05 la pasa a esperando_aprobacion.\n  // Si un botón la encuentra aún así, no llegó a aprobación: el botón no hace nada.\n  retenido_bucle: 'retenido',\n};\n// Estados que admiten botones.\nconst OPEN = ['esperando_aprobacion', 'esperando_edicion', 'error_envio'];\n\nfunction rowOf(state) {\n  if (state && typeof state === 'object') {\n    return {\n      exists: Boolean(state.id || state.status),\n      status: String(state.status || state.previous_status || ''),\n      blocked: Boolean(state.injection_flag || state.blocked),\n      hasFinal: String(state.final_reply || '').trim() !== '' || Boolean(state.has_final_reply),\n      hasDraft: state.has_draft !== undefined ? Boolean(state.has_draft) : String(state.draft_reply || '').trim() !== '',\n      expired: Boolean(state.expired),\n    };\n  }\n  const status = String(state || '');\n  return { exists: status !== '', status, blocked: false, hasFinal: false, hasDraft: true, expired: false };\n}\n\n// state: el estado (string) o la fila { status, injection_flag, draft_reply |\n// has_draft, final_reply | has_final_reply, expired }. action: approve|reject|edit.\n// Devuelve { apply, fromStatus, nextStatus, next, notice, result,\n// removeButtons, needsWindowCheck }.\n// apply=false → no se escribe nada en la base de datos.\nfunction callbackOutcome(state, action) {\n  const row = rowOf(state);\n  const out = (fields) => ({\n    apply: false, fromStatus: row.status, nextStatus: row.status, next: 'none', notice: '', result: '',\n    removeButtons: false, needsWindowCheck: false, ...fields,\n  });\n  if (!ACTIONS.includes(action)) return out({ notice: 'Botón desconocido. No se hace nada.' });\n  if (!row.exists) return out({ notice: 'Este mensaje ya no corresponde a ningún DM (¿borrado por retención?).', result: 'sin_fila', removeButtons: true });\n\n  const status = row.status;\n  if (OPEN.includes(status) && row.expired) {\n    return out({ notice: NOTICES.aprobacion_vencida, result: 'vencido', removeButtons: true });\n  }\n\n  if (status === 'esperando_aprobacion' || status === 'error_envio') {\n    if (action === 'approve') {\n      // Bloqueado (inyección, fuga, promesa, enlace ajeno) o sin borrador:\n      // Aprobar no tiene nada seguro que enviar. Editar y Rechazar siguen valiendo.\n      if ((row.blocked || !row.hasDraft) && !row.hasFinal) {\n        return out({ notice: row.blocked\n          ? 'Este DM está bloqueado (intentó dar órdenes, filtraba instrucciones, prometía algo o traía un enlace ajeno). No se puede aprobar: usa Editar y escribe tú la respuesta.'\n          : 'No hay borrador que enviar. Usa Editar y escribe tú la respuesta, o Rechazar.' });\n      }\n      return out({\n        apply: true, nextStatus: 'aprobado', next: 'send', result: 'enviando', removeButtons: true, needsWindowCheck: true,\n        notice: status === 'error_envio' ? 'Aprobado otra vez. Reintentando el envío.' : 'Aprobado. Enviando la respuesta.',\n      });\n    }\n    if (action === 'reject') {\n      return out({ apply: true, nextStatus: 'rechazado', next: 'reject', result: 'rechazado', removeButtons: true, notice: 'Rechazado. No se envía nada.' });\n    }\n    return out({\n      apply: true, nextStatus: 'esperando_edicion', next: 'edit', result: 'editando', removeButtons: true,\n      notice: 'Escribe ahora en este chat el texto que se enviará (máx. 1000 bytes).',\n    });\n  }\n\n  if (status === 'esperando_edicion') {\n    if (action === 'edit') return out({ notice: 'Ya estás editando: escribe el texto en este chat.' });\n    if (action === 'reject') {\n      return out({ apply: true, nextStatus: 'rechazado', next: 'reject', result: 'rechazado', removeButtons: true, notice: 'Rechazado. Se cancela la edición y no se envía nada.' });\n    }\n    // Aprobar durante la edición = enviar el borrador original, si se puede.\n    if (row.blocked || !row.hasDraft) {\n      return out({ notice: 'No hay borrador seguro que aprobar. Escribe el texto en este chat o pulsa Rechazar.' });\n    }\n    return out({\n      apply: true, nextStatus: 'aprobado', next: 'send', result: 'enviando', removeButtons: true, needsWindowCheck: true,\n      notice: 'Aprobado el borrador original. Se cancela la edición y se envía.',\n    });\n  }\n\n  const notice = NOTICES[status] || `No se puede hacer eso ahora (estado: ${status}).`;\n  if (IN_FLIGHT.includes(status)) return out({ notice });\n  if (STALE_RESULTS[status]) return out({ notice, result: STALE_RESULTS[status], removeButtons: true });\n  return out({ notice, result: 'otro' });\n}\n\n// --- Edición -----------------------------------------------------------------\n\n// Texto libre del chat autorizado mientras hay DMs en esperando_edicion.\n// pending: filas de ese chat en esperando_edicion\n//   [{ id, telegram_edit_id?, approval_due_at? }].\n// Se aplica si hay UNA sola fila viva (o si el texto responde, citándolo, al\n// mensaje de edición de una de ellas). Más de 1000 bytes: aviso y no se envía.\nfunction editOutcome(input) {\n  const args = input || {};\n  const now = args.now === undefined ? Date.now() : new Date(args.now).getTime();\n  const text = String(args.text ?? '').replace(/\\r\\n?/g, '\\n').trim();\n  const out = (fields) => ({\n    apply: false, igMessageId: '', finalReply: '', fromStatus: 'esperando_edicion', nextStatus: 'esperando_edicion',\n    notice: '', reason: '', bytes: utf8Bytes(text), needsWindowCheck: false, ...fields,\n  });\n  const alive = (Array.isArray(args.pending) ? args.pending : []).filter((row) => {\n    if (!row || !row.id) return false;\n    if (row.approval_due_at === null || row.approval_due_at === undefined || row.approval_due_at === '') return true;\n    const due = new Date(row.approval_due_at).getTime();\n    return Number.isFinite(due) && Number.isFinite(now) && due > now;\n  });\n  if (!text) return out({ reason: 'vacio', notice: 'Texto vacío: no se envía nada.' });\n  const replyTo = String(args.replyTo ?? '');\n  let target = replyTo ? alive.find((row) => String(row.telegram_edit_id ?? '') === replyTo) : null;\n  if (!target) {\n    if (alive.length === 0) return out({ reason: 'sin_edicion', notice: 'No hay ninguna respuesta esperando texto. Ese mensaje no se envía a nadie.' });\n    if (alive.length > 1) {\n      return out({ reason: 'varias_ediciones', notice: `Hay ${alive.length} respuestas esperando texto. Contesta citando el mensaje de edición de la que quieras; este texto no se envía.` });\n    }\n    target = alive[0];\n  }\n  const bytes = utf8Bytes(text);\n  if (bytes > DM_MAX_BYTES) {\n    return out({ igMessageId: String(target.id), reason: 'demasiado_largo', notice: `Tu texto ocupa ${bytes} bytes y el máximo de Instagram es ${DM_MAX_BYTES} (cada tilde o ñ cuenta 2 y cada emoji 4). No se envía: escríbelo más corto.` });\n  }\n  return out({\n    apply: true, igMessageId: String(target.id), finalReply: text, nextStatus: 'aprobado', reason: 'editado',\n    notice: 'Texto guardado. Enviando tu respuesta.', needsWindowCheck: true,\n  });\n}\n\nconst update = $('Leer update').item.json;\nconst outcome = editOutcome({ text: update.text, replyTo: update.replyTo, pending: $json.pending || [], now: Date.now() });\nreturn { json: { ...update, ...outcome } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "ba33c092-9533-5cde-b291-2024d3d59b4a",
+      "name": "Qué texto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        520
+      ],
+      "notes": "Una edición abierta: vale cualquier texto. Varias: hay que citar el mensaje de ayuda. Más de 1000 bytes: no se envía."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.notice }}",
+        "replyMarkup": "none",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false,
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "3ec8e69b-d42d-5006-bed5-5978d08dcb84",
+      "name": "Responder texto",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1800,
+        520
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "notes": "Dice qué se ha hecho con el texto.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Qué texto').item.json.apply }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "86ed7d0b-908e-51ce-b671-b3c5f7701edd",
+      "name": "¿Guardar texto?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2020,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH upd AS (\n  UPDATE ig_messages SET final_reply = $2, status = 'aprobado'\n  WHERE id = $1::uuid AND status = 'esperando_edicion'\n    AND (approval_due_at IS NULL OR approval_due_at > now())\n  RETURNING id\n), log AS (\n  INSERT INTO ig_actions (message_id, action, detail)\n  SELECT id, 'editado', jsonb_build_object('bytes', $3::int) FROM upd\n  RETURNING id\n)\nSELECT (SELECT id::text FROM upd) AS id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$('Qué texto').item.json.igMessageId, $('Qué texto').item.json.finalReply, $('Qué texto').item.json.bytes] }}"
+        }
+      },
+      "id": "39a059c1-a42a-5405-b650-23431246e25d",
+      "name": "Guardar texto",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2240,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "esperando_edicion → aprobado con tu texto en final_reply.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5ed5df85-92dd-560f-86f1-dfce093d127b",
+      "name": "¿Texto guardado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2460,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuración').first().json.n8n_url.replace(/\\/$/, '') + '/webhook/ig-send' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message_id: $json.id, mode: 'manual' }) }}",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "8ee21852-25c8-5ffd-b964-82ee6a8c8869",
+      "name": "Pedir envío editado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2680,
+        520
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "IG 04 marca el mensaje «✅ Enviado con tu texto».",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.error;\nreturn { json: { id: $('Guardar texto').item.json.id, fallo: String(typeof raw === 'string' ? raw : (raw && (raw.message || raw.description)) || JSON.stringify(raw || 'sin detalle')).slice(0, 400) } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "e9c56b22-343a-5596-ac0e-132f46fe7ee5",
+      "name": "Fallo editado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2900,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH upd AS (\n  UPDATE ig_messages SET status = 'esperando_aprobacion'\n  WHERE id = $1::uuid AND status = 'aprobado'\n  RETURNING id, igsid, username, text_normalized, category, confidence, draft_reply, final_reply, reasoning, reasons, rag_sources, injection_flag, sensitive_flag, telegram_chat_id, telegram_message_id, window_expires_at\n), log AS (\n  INSERT INTO ig_actions (message_id, action, detail)\n  SELECT id, 'error_llamada_04', jsonb_build_object('error', $2::text) FROM ig_messages WHERE id = $1::uuid\n  RETURNING id\n)\nSELECT u.id::text AS id, u.igsid, u.username, u.text_normalized, u.category, u.confidence, u.draft_reply, u.final_reply, u.reasoning, u.reasons, u.rag_sources, u.injection_flag, u.sensitive_flag, u.telegram_chat_id, u.telegram_message_id, GREATEST(u.window_expires_at, (SELECT max(o.window_expires_at) FROM ig_messages o WHERE o.igsid = u.igsid)) AS window_expires_at,\n       EXISTS (SELECT 1 FROM ig_actions a WHERE a.message_id = u.id AND a.action = 'aviso_error_envio'\n               AND a.detail->>'telegram_message_id' = u.telegram_message_id) AS on_failure_message,\n       (SELECT a.detail->>'error' FROM ig_actions a WHERE a.message_id = u.id AND a.action = 'error_envio'\n         ORDER BY a.id DESC LIMIT 1) AS last_send_error,\n       (EXISTS (SELECT 1 FROM ig_actions a WHERE a.message_id = u.id AND a.action = 'retenido_bucle')\n         OR COALESCE(u.reasons @> '[\"bucle\"]'::jsonb, false)) AS loop_hold,\n       $2::text AS fallo\nFROM (SELECT 1) AS one LEFT JOIN upd u ON true",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.id, $json.fallo] }}"
+        }
+      },
+      "id": "1042472f-0e36-578d-8e50-3825ed7b9dfb",
+      "name": "Deshacer aprobación",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4220,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "IG 04 no recibió la petición: la fila vuelve a esperando_aprobacion (tu texto editado se conserva).",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Textos que salen a Telegram. Todo lo que viene de Instagram (usuario, comentario,\n// mensaje, borrador) se escapa: el mensaje va con parse_mode HTML.\n// Forma de todos los avisos (la misma que en el agente de correo): emoji y título\n// en negrita, campos \"Etiqueta: valor\" uno por línea, bloques separados por una\n// línea en blanco, el texto largo en una cita.\n\n// Telegram corta en 4096. Los avisos se quedan en 3600 para que quepa la línea\n// de resultado que se añade al pulsar un botón (withResult).\nconst TELEGRAM_MAX = 4096;\nconst MESSAGE_MAX = 3600;\n\nfunction escapeHtml(value) {\n  return String(value ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\n// Recorta sin dejar medio emoji (un surrogate suelto lo rechaza Telegram).\nfunction cut(value, max) {\n  const text = String(value ?? '');\n  if (text.length <= max) return text;\n  let end = Math.max(0, max);\n  const code = text.charCodeAt(end - 1);\n  if (code >= 0xD800 && code <= 0xDBFF) end -= 1;\n  return text.slice(0, end);\n}\n\nfunction quote(text) {\n  return `<blockquote>${text}</blockquote>`;\n}\n\n// parts: líneas ya escapadas y, como mucho, un bloque largo\n// { raw, limit, render(textoEscapado, recortado) }. Si no cabe, se recorta solo\n// ese bloque. Cabecera y pie salen siempre enteros.\nfunction fit(parts, max = MESSAGE_MAX) {\n  const long = parts.find((part) => typeof part !== 'string');\n  const render = (raw, trimmed) => parts\n    .map((part) => (typeof part === 'string' ? part : part.render(escapeHtml(raw), trimmed)))\n    .join('\\n');\n  if (!long) return render('', false);\n  let raw = String(long.raw ?? '');\n  let trimmed = false;\n  if (long.limit && raw.length > long.limit) {\n    raw = cut(raw, long.limit).trimEnd() + ' […]';\n    trimmed = true;\n  }\n  const full = render(raw, trimmed);\n  if (full.length <= max) return full;\n  let keep = raw.length - (full.length - max) - 20;\n  while (keep > 0) {\n    const out = render(cut(raw, keep).trimEnd() + ' […]', true);\n    if (out.length <= max) return out;\n    keep -= Math.max(10, out.length - max);\n  }\n  return render('[…]', true);\n}\n\n// Hora de Madrid sin depender de ICU: UTC+1, y UTC+2 desde el último domingo\n// de marzo hasta el último de octubre (a la 01:00 UTC, regla de la UE).\nfunction lastSundayUtc(year, month) {\n  const last = new Date(Date.UTC(year, month + 1, 0));\n  return last.getUTCDate() - last.getUTCDay();\n}\n\nfunction madridLocal(date) {\n  const when = new Date(date === undefined ? Date.now() : date);\n  const year = when.getUTCFullYear();\n  const summerStart = Date.UTC(year, 2, lastSundayUtc(year, 2), 1);\n  const summerEnd = Date.UTC(year, 9, lastSundayUtc(year, 9), 1);\n  const offset = when.getTime() >= summerStart && when.getTime() < summerEnd ? 2 : 1;\n  return new Date(when.getTime() + offset * 3600000);\n}\n\nfunction pad2(value) {\n  return String(value).padStart(2, '0');\n}\n\nfunction madridTime(date) {\n  const local = madridLocal(date);\n  return pad2(local.getUTCHours()) + ':' + pad2(local.getUTCMinutes());\n}\n\n// \"10/11 18:30\", hora de Madrid. Para las ventanas, que cruzan de día.\nfunction madridStamp(date) {\n  const local = madridLocal(date);\n  return `${pad2(local.getUTCDate())}/${pad2(local.getUTCMonth() + 1)} ${madridTime(date)}`;\n}\n\nfunction validDate(value) {\n  if (value === undefined || value === null || value === '') return null;\n  const date = new Date(value);\n  return Number.isNaN(date.getTime()) ? null : date;\n}\n\n// \"@usuario_demo\" si lo conocemos; si no, el IGSID (en comentarios y mensajes\n// sin nombre de usuario). Nunca queda vacío.\nfunction userLine(row) {\n  const username = String(row.username || '').trim().replace(/^@/, '');\n  const igsid = String(row.igsid || '').trim();\n  if (username) return `Usuario: @${escapeHtml(cut(username, 80))}${igsid ? ` (<code>${escapeHtml(cut(igsid, 40))}</code>)` : ''}`;\n  return `Usuario: ${igsid ? `<code>${escapeHtml(cut(igsid, 40))}</code>` : '(desconocido)'}`;\n}\n\n// Lo que escribió el usuario. En ig_messages se guarda en text_normalized.\nfunction userText(row) {\n  return String(row.text ?? row.text_normalized ?? '').trim();\n}\n\nconst CATEGORY_LABELS = {\n  consulta_frecuente: 'consulta frecuente',\n  revision: 'revisión',\n  fuera_de_tema: 'fuera de tema',\n  sensible: 'tema sensible',\n};\n\nfunction categoryLabel(category) {\n  return CATEGORY_LABELS[category] || String(category || 'sin categoría').replace(/_/g, ' ');\n}\n\nfunction formatSources(sources) {\n  const list = Array.isArray(sources) ? sources.slice(0, 3) : [];\n  if (!list.length) return 'Sin fragmentos en la base de conocimiento.';\n  return list.map((source) => {\n    const title = cut(String(source.title || 'Documento'), 120);\n    const when = source.updated_at ? ` (${String(source.updated_at).slice(0, 10)})` : '';\n    const url = cut(String(source.canonical_url || source.url || ''), 200);\n    return `• ${title}${when}${url ? `\\n  ${url}` : ''}`;\n  }).join('\\n');\n}\n\nfunction loopHoldText(row) {\n  const minutes = Number(row && row.loop_minutes);\n  const span = Number.isFinite(minutes) && minutes > 0 ? `hace menos de ${minutes} min` : 'hace poco';\n  return `Retenido por el freno anti-bucles: a este usuario ya se le contestó automáticamente ${span}. Revísalo antes de enviar.`;\n}\nconst SENSITIVE_TEXT = 'Tema sensible: habla de precio, plazo, devolución o datos personales. Hace falta una persona.';\nconst WINDOW_RULE_TEXT = 'Instagram solo deja contestar dentro de las 24 h siguientes al último mensaje del usuario.';\n\n// El título dice por qué está bloqueado. Mandan los motivos de decide.js\n// (ig_messages.reasons); si no llegan, el principio del razonamiento, que\n// decide.js escribe con estas mismas frases. Mismo orden de prioridad que decide.js.\nconst BLOCKED_TITLES = [\n  ['inyeccion', /^El mensaje intenta dar instrucciones/, 'Bloqueado: intenta dar órdenes'],\n  ['promesa', /^El borrador prometía/, 'Bloqueado: el borrador prometía dinero o plazos'],\n  ['fuga_prompt', /^El borrador repetía instrucciones internas/, 'Bloqueado: el borrador repetía instrucciones internas'],\n  ['enlace_ajeno', /^El borrador traía un enlace/, 'Bloqueado: el borrador traía un enlace o un contacto ajeno'],\n  ['fuente_sospechosa', /^Una fuente de la base de conocimiento/, 'Bloqueado: fuente sospechosa en la base de conocimiento'],\n];\n\nfunction reasonList(value) {\n  let list = value;\n  if (typeof list === 'string') {\n    try { list = JSON.parse(list); } catch { list = []; }\n  }\n  return Array.isArray(list) ? list.map((item) => String(item)) : [];\n}\n\nfunction blockedTitle(reasoning, reasons) {\n  const codes = reasonList(reasons);\n  const byCode = BLOCKED_TITLES.find(([code]) => codes.includes(code));\n  if (byCode) return byCode[2];\n  const text = String(reasoning || '').trim();\n  const byText = BLOCKED_TITLES.find(([, regex]) => regex.test(text));\n  return byText ? byText[2] : 'Bloqueado: revísalo antes de contestar';\n}\n\n// Motivos por los que no salió solo. labels: el mapa REASONS de decide.js\n// (código → frase). Sin mapa, salen los códigos.\nfunction reasonsBlock(reasons, labels) {\n  const codes = reasonList(reasons);\n  if (!codes.length) return [];\n  const map = labels && typeof labels === 'object' ? labels : {};\n  return ['', '<b>Motivos</b>', ...codes.slice(0, 8).map((code) => `• ${escapeHtml(cut(String(map[code] || code), 200))}`)];\n}\n\n// Línea de la ventana de 24 h. Con \"now\" avisa si ya se cerró.\nfunction windowLine(row, now) {\n  const expires = validDate(row.window_expires_at);\n  if (!expires) return '';\n  if (now !== undefined && now !== null) {\n    const current = validDate(now);\n    if (current && expires.getTime() <= current.getTime()) return `⌛ La ventana de 24 h se cerró el ${madridStamp(expires)}: ya no se podrá enviar.`;\n  }\n  return `⏳ Ventana de 24 h: se cierra el ${madridStamp(expires)} (hora de Madrid).`;\n}\n\n// Fila de ig_messages -> campos de approvalMessage. La usan el flujo 05 al mandar\n// el aviso y el 04/06 al rehacerlo para quitarle los botones: sale igual.\nfunction approvalFromRow(row) {\n  let sources = Array.isArray(row.sources) ? row.sources : row.rag_sources;\n  if (typeof sources === 'string') {\n    try { sources = JSON.parse(sources); } catch { sources = []; }\n  }\n  return {\n    username: row.username,\n    igsid: row.igsid,\n    text: row.text,\n    text_normalized: row.text_normalized,\n    category: row.category,\n    confidence: row.confidence,\n    draft_reply: row.draft_reply,\n    reasoning: row.reasoning,\n    window_expires_at: row.window_expires_at,\n    loop_minutes: row.loop_minutes,\n    reasons: reasonList(row.reasons),\n    reason_labels: row.reason_labels,\n    sources: Array.isArray(sources) ? sources : [],\n    injection: row.injection === true || row.injection_flag === true,\n    sensitive: row.sensitive === true || row.sensitive_flag === true,\n    loop_hold: row.loop_hold === true,\n  };\n}\n\n// Acepta la fila de ig_messages tal cual (rag_sources, injection_flag…) o ya mapeada.\nfunction approvalMessage(input, now) {\n  const row = approvalFromRow(input || {});\n  const blocked = Boolean(row.injection);\n  const parts = blocked\n    ? [`🛑 <b>${blockedTitle(row.reasoning, row.reasons)}</b>`, userLine(row)]\n    : [\n      '📝 <b>Borrador para aprobar (Instagram)</b>',\n      userLine(row),\n      `Categoría: ${escapeHtml(categoryLabel(row.category))} · confianza ${Math.round(Number(row.confidence || 0) * 100)} %`,\n    ];\n  const window = windowLine(row, now);\n  if (window) parts.push(window);\n  const warnings = [];\n  // El flujo 04 no lo mandó solo: ese usuario ya recibió una respuesta automática hace poco.\n  if (row.loop_hold) warnings.push('🔁 ' + loopHoldText(row));\n  if (row.sensitive) warnings.push('⚠️ ' + SENSITIVE_TEXT);\n  if (warnings.length) parts.push('', ...warnings);\n  if (row.reasoning) parts.push('', `Por qué: ${escapeHtml(cut(String(row.reasoning).trim(), 300))}`);\n  parts.push(...reasonsBlock(row.reasons, row.reason_labels));\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 800));\n  if (!blocked) {\n    const draft = String(row.draft_reply || '').trim();\n    parts.push('', '<b>Borrador</b>');\n    parts.push(draft\n      ? { raw: draft, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortado para Telegram. El mensaje sale entero.</i>' : '') }\n      : '(vacío: escribe tú la respuesta con Editar)');\n  }\n  parts.push('', '<b>Fuentes</b>', escapeHtml(formatSources(row.sources)));\n  // Bloqueado = sin borrador. Lo que vea el usuario lo escribe una persona.\n  if (blocked) parts.push('', 'Sin borrador y sin botón Aprobar: escribe tú la respuesta con Editar, o Rechazar.');\n  return fit(parts);\n}\n\n// fit() admite un solo bloque largo. El texto del usuario va con este, recortado\n// a mano; el borrador o la respuesta es el bloque largo de cada aviso.\nfunction shortBlock(text, limit) {\n  const clean = String(text || '').trim();\n  return clean ? quote(escapeHtml(cut(clean, limit)) + (clean.length > limit ? ' […]' : '')) : '(sin texto)';\n}\n\n// Respuesta enviada. options.mode: 'auto' (el agente solo) o 'manual' (tú pulsaste\n// Aprobar o Editar). options.dryRun: no salió nada a Instagram.\nfunction sentNotice(row, options) {\n  const opts = options || {};\n  const auto = opts.mode === 'auto';\n  const parts = [\n    auto ? '🤖 <b>Respondido solo (Instagram)</b>' : '✅ <b>Respuesta enviada (Instagram)</b>',\n    userLine(row),\n    '',\n    '<b>Mensaje del usuario</b>',\n    shortBlock(userText(row), 600),\n    '',\n    auto ? '<b>Respuesta</b>' : '<b>Respuesta enviada</b>',\n  ];\n  const reply = String(row.final_reply || row.draft_reply || '').trim();\n  parts.push(reply\n    ? { raw: reply, limit: 1000, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortada para Telegram. Salió entera.</i>' : '') }\n    : '(sin texto)');\n  if (opts.dryRun) parts.push('', '🧪 Simulado (DRY_RUN): no se envió nada a Instagram.');\n  return fit(parts);\n}\n\n// No se envió porque pasaron 24 h desde el mensaje del usuario.\nfunction windowClosedNotice(row) {\n  const parts = ['⌛ <b>No se envió: la ventana de 24 h ya se cerró</b>', userLine(row)];\n  const expires = validDate(row.window_expires_at);\n  if (expires) parts.push(`La ventana se cerró el ${madridStamp(expires)} (hora de Madrid).`);\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 500));\n  const draft = String(row.final_reply || row.draft_reply || '').trim();\n  if (draft) parts.push('', '<b>Respuesta que no salió</b>', { raw: draft, limit: 800, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortada para Telegram.</i>' : '') });\n  parts.push('', WINDOW_RULE_TEXT + ' Si todavía merece la pena, contéstale tú desde la app de Instagram.');\n  return fit(parts);\n}\n\n// Retenido por el freno anti-bucles: pasa a aprobación en vez de salir solo.\nfunction heldNotice(row) {\n  const parts = ['🔁 <b>Retenido por el freno anti-bucles</b>', userLine(row), '', loopHoldText(row)];\n  const window = windowLine(row);\n  if (window) parts.push(window);\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 500));\n  return fit(parts);\n}\n\nconst COMMENT_ERROR_HINTS = {\n  rate_limit: 'Es un límite de Meta. Se reintenta solo, cada vez más espaciado, mientras el comentario tenga menos de 7 días.',\n  window_closed: 'La ventana para contestar se cerró. No se reintenta.',\n  invalid_comment: 'Meta no acepta ese comentario para respuesta privada (ya tenía una, pasaron 7 días o no es válido). No se reintenta.',\n  permission: 'Falta un permiso o la cuenta tiene desactivado el acceso a mensajes. Revisa la app de Meta.',\n  token: 'El token de Meta ya no vale. Genera uno nuevo y actualiza la credencial «Instagram Token».',\n  not_found: 'Meta no encuentra ese ID o el token no lo ve. Revisa el ID de la cuenta y los permisos.',\n  blocked: 'Esa persona no está disponible o te ha bloqueado. No se reintenta.',\n  transient: 'Error temporal de Meta. Se reintenta solo.',\n};\n\n// Un comentario que no se pudo contestar. error: lo que devuelve classifyError\n// (o un texto suelto). row: { comment_id, username, igsid, text, keyword, attempts, id }.\nfunction commentErrorNotice(row, error) {\n  const detail = error && typeof error === 'object' ? error : { message: error };\n  const parts = ['⚠️ <b>Error con un comentario</b>', userLine(row)];\n  if (row.keyword) parts.push(`Palabra clave: ${escapeHtml(cut(String(row.keyword), 80))}`);\n  if (row.comment_id) parts.push(`Comentario: <code>${escapeHtml(cut(String(row.comment_id), 60))}</code>`);\n  if (row.attempts) parts.push(`Intentos: ${escapeHtml(String(row.attempts))}`);\n  parts.push('', shortBlock(row.text, 300));\n  const codes = detail.code ? ` (código ${escapeHtml(String(detail.code))}${detail.subcode ? `/${escapeHtml(String(detail.subcode))}` : ''})` : '';\n  parts.push('', `Error${codes}: <code>${escapeHtml(cut(String(detail.message || 'sin detalle').replace(/\\s+/g, ' ').trim(), 400))}</code>`);\n  const hint = COMMENT_ERROR_HINTS[detail.kind];\n  if (hint) parts.push('', `<b>Qué hacer:</b> ${escapeHtml(hint)}`);\n  return fit(parts);\n}\n\n// Aviso genérico de fallo. Corto y sin el texto del usuario.\nfunction failureMessage(what, row, error) {\n  const parts = [`⚠️ <b>Fallo: ${escapeHtml(cut(String(what), 200))}</b>`];\n  if (row && (row.username || row.igsid)) parts.push(userLine(row));\n  if (row && row.id) parts.push(`Fila: <code>${escapeHtml(row.id)}</code>`);\n  parts.push(`Error: <code>${escapeHtml(cut(String(error || 'sin detalle'), 500))}</code>`);\n  if (row && row.hint) parts.push('', `<b>Qué hacer:</b> ${escapeHtml(cut(String(row.hint), 1200))}`);\n  return fit(parts);\n}\n\nconst SEND_FAILURE_HINT = 'Queda en error_envio. Reintentar lo manda otra vez (tu texto si lo editaste), siempre que la ventana de 24 h siga abierta. Si nadie pulsa, vence como una aprobación.';\n\nfunction sendFailureMessage(row, error) {\n  return failureMessage('no se pudo enviar el mensaje', { ...row, hint: SEND_FAILURE_HINT }, error);\n}\n\n// Resumen diario. Secciones; las líneas a 0 no salen, salvo las importantes.\n// counts (los rellena la consulta del flujo 07; ausentes = 0):\n//   keyword_comments   comentarios con palabra clave\n//   private_sent       respuestas privadas enviadas\n//   auto_replied       mensajes contestados solos\n//   approved           mensajes aprobados por ti (Aprobar o Editar)\n//   rejected           rechazados por ti\n//   expired_approvals  aprobaciones vencidas\n//   expired_windows    ventanas de 24 h vencidas (no se envió)\n//   blocked_injection  bloqueados por inyección\n//   blocked_sensitive  retenidos por tema sensible\n//   blocked_loop       retenidos por el freno anti-bucles\n//   errors             con error\n//   waiting            esperando aprobación\n//   stuck              atascados más de 1 h\n//   purged             borrados por retención\nfunction summaryMessage(counts) {\n  const data = counts || {};\n  const n = (key) => (Number.isFinite(Number(data[key])) ? Math.max(0, Math.trunc(Number(data[key]))) : 0);\n  const section = (title, rows) => {\n    const shown = rows.filter(([, value, always]) => always || value > 0);\n    return shown.length ? ['', `<b>${title}</b>`, ...shown.map(([label, value]) => `${label}: ${value}`)] : [];\n  };\n  const expired = n('expired_approvals') + n('expired_windows');\n  const blocked = n('blocked_injection') + n('blocked_sensitive') + n('blocked_loop');\n  const blockedDetail = [\n    n('blocked_injection') ? `${n('blocked_injection')} inyección` : '',\n    n('blocked_sensitive') ? `${n('blocked_sensitive')} sensibles` : '',\n    n('blocked_loop') ? `${n('blocked_loop')} bucle` : '',\n  ].filter(Boolean).join(', ');\n  const expiredDetail = [\n    n('expired_approvals') ? `${n('expired_approvals')} aprobaciones` : '',\n    n('expired_windows') ? `${n('expired_windows')} ventanas de 24 h` : '',\n  ].filter(Boolean).join(', ');\n  const lines = [\n    '📊 <b>Resumen de ayer · Instagram</b>',\n    ...section('Comentarios', [\n      ['Con palabra clave', n('keyword_comments')],\n      ['Privados enviados', n('private_sent')],\n    ]),\n    ...section('Mensajes directos', [\n      ['Contestados solos', n('auto_replied')],\n      ['Aprobados por ti', n('approved')],\n      ['Rechazados por ti', n('rejected')],\n    ]),\n    ...section('Pendiente de ti', [\n      ['Esperando aprobación', n('waiting'), true],\n    ]),\n    ...section('Sin enviar', [\n      [`Vencidos${expiredDetail ? ` (${expiredDetail})` : ''}`, expired],\n      [`Bloqueados${blockedDetail ? ` (${blockedDetail})` : ''}`, blocked],\n    ]),\n    ...section('Problemas', [\n      ['Con error (míralos)', n('errors'), true],\n      ['Atascados más de 1 h', n('stuck')],\n    ]),\n  ];\n  if (n('purged')) lines.push('', `Borrados por retención: ${n('purged')}`);\n  const plural = (value, one, many) => `${value} ${value === 1 ? one : many}`;\n  const todo = [\n    n('waiting') ? `${n('waiting')} por aprobar` : '',\n    n('errors') ? `${n('errors')} con error` : '',\n    n('stuck') ? plural(n('stuck'), 'atascado', 'atascados') : '',\n    expired ? plural(expired, 'vencido', 'vencidos') : '',\n  ].filter(Boolean);\n  lines.push('', todo.length ? `👉 Te toca: ${todo.join(', ')}.` : '✅ Nada pendiente de ti.');\n  return lines.join('\\n');\n}\n\n// Línea que se añade al mensaje con botones cuando se decide. telegram.js dice\n// qué pasó (la clave); aquí está cómo se lee.\nconst RESULTS = {\n  enviando: '⏳ Aprobado. Enviando…',\n  enviado: '✅ Aprobado y enviado',\n  enviado_editado: '✅ Enviado con tu texto',\n  rechazado: '❌ Rechazado',\n  editando: '✏️ Editando: escribe en este chat el texto que se enviará',\n  fallo_envio: '⚠️ Falló el envío',\n  fallo_04: '⚠️ Falló el envío: el flujo IG 04 no recibió la petición',\n  ya_respondido: '✅ Ya estaba respondido. No se envía otra vez.',\n  ya_rechazado: '❌ Ya estaba rechazado. No se envía nada.',\n  vencido: '⌛ Venció el plazo de aprobación. No se envía nada.',\n  vencido_ventana: '⌛ No se envió: la ventana de 24 h ya se cerró',\n  retenido: '🔁 Retenido por el freno anti-bucles y aún sin pasar a aprobación. Este botón no envía nada.',\n  sin_fila: 'ℹ️ Este mensaje ya no corresponde a ningún mensaje de Instagram.',\n  otro: 'ℹ️ Este botón ya no hace nada.',\n};\nconst RESULT_TAILS = {\n  fallo_envio: 'Tienes Reintentar en el aviso de abajo.',\n  fallo_04: 'Pulsa Aprobar otra vez cuando esté.',\n};\n\nfunction resultLine(kind, options = {}) {\n  let line = RESULTS[kind] || RESULTS.otro;\n  if (options.detail) line += ': ' + escapeHtml(cut(String(options.detail).replace(/\\s+/g, ' ').trim(), 200));\n  if (options.when) line += ' · ' + options.when;\n  const tail = options.tail || RESULT_TAILS[kind];\n  return tail ? `${line}. ${tail}` : line;\n}\n\nfunction withResult(base, line) {\n  return cut(`${base}\\n\\n${line}`, TELEGRAM_MAX);\n}\n\n// Un botón de un mensaje que ya no tiene fila: se rehace con el texto plano que\n// trae el propio botón (Telegram lo manda sin formato).\nfunction plainMessage(text) {\n  return escapeHtml(cut(String(text || '').trim(), 3000));\n}\n\n// Ayuda que manda IG 06 al pulsar Editar. Con una sola edición abierta vale\n// cualquier texto del chat; con varias, hay que responder citando este mensaje.\nfunction editHelpMessage(row) {\n  const parts = ['✏️ <b>Escribe la respuesta</b>', userLine(row || {})];\n  const window = windowLine(row || {});\n  if (window) parts.push(window);\n  parts.push(\n    '',\n    'Manda en este chat el texto exacto que recibirá por DM (máx. 1000 bytes: cada tilde o ñ cuenta 2 y cada emoji 4).',\n    'Si tienes varias ediciones abiertas, responde citando este mensaje.',\n  );\n  return fit(parts);\n}\n\n'use strict';\n\n// Capa 3 y ruta de un DM. La decisión final no se fía del modelo.\n//\n// route:\n//   'auto'     → IG 04 lo envía solo. Exige que se cumpla TODO (ver decide()).\n//   'approval' → IG 05 lo manda a Telegram con Aprobar/Editar/Rechazar.\n//   'ignore'   → no se contesta (ventana de 24 h cerrada, sin texto o spam).\n// reasons: motivos fijos de por qué NO es 'auto' (ver REASONS). Vacío = auto.\n//\n// Un borrador \"bloqueado\" (inyección, fuga del prompt, promesa de dinero o\n// plazos, enlace ajeno, fuente envenenada o JSON roto) se tira: draft = '' y\n// injection = true, igual que en el episodio 3. En Telegram, Aprobar no envía\n// nada si no hay texto: solo sale lo que escriba una persona con Editar.\n//\n// Sin require: este fichero se copia dentro de un Code node de n8n.\n\nconst CATEGORIES = ['consulta_frecuente', 'fuera_de_base', 'sensible', 'queja', 'saludo', 'spam'];\nconst KEYS = ['category', 'confidence', 'draft_reply', 'reasoning'];\n\n// Motivos fijos (código → texto para el aviso de Telegram).\nconst REASONS = {\n  ventana_cerrada: 'La ventana de 24 h de Instagram está cerrada (o no se conoce): ya no se puede responder por DM.',\n  sin_texto: 'El mensaje no trae texto (solo adjuntos o emoji).',\n  spam: 'El modelo lo clasificó como spam.',\n  json_invalido: 'El modelo no devolvió un JSON válido con el esquema exacto.',\n  inyeccion: 'El mensaje intenta dar instrucciones al sistema (inyección de prompt).',\n  fuente_sospechosa: 'Una fuente del RAG contiene instrucciones o marcas: posible fuente envenenada.',\n  categoria: 'La categoría no es consulta_frecuente.',\n  sensible: 'Toca un tema sensible (precios, contratos, devoluciones, datos personales…).',\n  confianza_baja: 'La confianza del modelo está por debajo del umbral.',\n  rag_bajo: 'No hay fuentes o la mejor fuente puntúa por debajo de min_rag_score.',\n  no_cubre: 'Las fuentes no cubren las palabras de la pregunta.',\n  sin_borrador: 'No hay borrador.',\n  promesa: 'El borrador promete dinero, descuentos o plazos que no están en las fuentes.',\n  fuga_prompt: 'El borrador repite instrucciones internas o marcas del prompt.',\n  enlace_ajeno: 'El borrador trae un enlace, dominio, correo, @usuario o teléfono que no está en las fuentes.',\n  formato: 'El borrador trae markdown o HTML (en un DM se vería tal cual).',\n  borrador_largo: 'El borrador pasa de 1000 bytes UTF-8 (límite de Instagram).',\n  bucle: 'Freno anti-bucles: ya hubo una respuesta automática a esta persona hace poco.',\n};\n\nconst DEFAULT_SENSITIVE = 'precio,precios,cuanto cuesta,cuánto cuesta,tarifa,tarifas,presupuesto,descuento,oferta,contrato,legal,devolucion,devolución,reembolso,garantia,garantía,factura,dni,iban,tarjeta,telefono,teléfono,direccion,dirección,datos personales,contraseña,password';\nconst MAX_BYTES = 1000;\nconst HOUR = 3600 * 1000;\nconst MAX_WINDOW_HOURS = 24;\n// Tolerancia de reloj: una ventana que acaba más allá de 24 h + 5 min es un dato roto.\nconst SKEW_MS = 5 * 60 * 1000;\n\n// --- Utilidades --------------------------------------------------------------\n\nfunction normalize(value) {\n  return String(value ?? '').normalize('NFKC').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036F]/g, '');\n}\n\nfunction utf8Bytes(value) {\n  let bytes = 0;\n  for (const ch of String(value ?? '')) {\n    const cp = ch.codePointAt(0);\n    if (cp < 0x80) bytes += 1;\n    else if (cp < 0x800) bytes += 2;\n    else if (cp < 0x10000) bytes += 3;\n    else bytes += 4;\n  }\n  return bytes;\n}\n\nfunction escapeRegex(text) {\n  return text.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n}\n\n// Instante en ms. Acepta Date, número (ms; o segundos si es < 1e11) o texto ISO.\n// Un ISO sin zona horaria se toma como UTC. Lo que no se entiende → NaN.\nfunction toMs(value) {\n  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return NaN;\n  if (value instanceof Date) return value.getTime();\n  if (typeof value === 'number') {\n    if (!Number.isFinite(value)) return NaN;\n    return Math.abs(value) < 1e11 ? value * 1000 : value;\n  }\n  if (typeof value === 'string') {\n    const text = value.trim();\n    if (/^\\d+(\\.\\d+)?$/.test(text)) return toMs(Number(text));\n    if (!/^\\d{4}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?)?(Z|[+-]\\d{2}(:?\\d{2})?)?$/i.test(text)) return NaN;\n    const withZone = /[T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?$/.test(text) ? text.replace(' ', 'T') + 'Z' : text.replace(' ', 'T');\n    return Date.parse(withZone);\n  }\n  return NaN;\n}\n\nfunction nowMs(now) {\n  return now === undefined ? Date.now() : toMs(now);\n}\n\n// --- Ventana de 24 h ---------------------------------------------------------\n\n// Fin de la ventana a partir del momento del mensaje del usuario. Nunca más de\n// 24 h: no se usa human_agent ni la ventana de 7 días de Click-to-Direct.\nfunction windowExpiry(tsIso, hours) {\n  const start = toMs(tsIso);\n  if (!Number.isFinite(start)) return null;\n  let h = Number(hours);\n  if (!Number.isFinite(h) || h <= 0) h = MAX_WINDOW_HOURS;\n  h = Math.min(h, MAX_WINDOW_HOURS);\n  const end = new Date(start + h * HOUR);\n  return Number.isNaN(end.getTime()) ? null : end.toISOString();\n}\n\n// Abierta solo si expiresAt > now (estricto). Nulo, NaN, ilegible o una\n// ventana que acaba más allá de 24 h desde ahora → cerrada, por seguridad.\nfunction isWindowOpen(expiresAt, now) {\n  const end = toMs(expiresAt);\n  const current = nowMs(now);\n  if (!Number.isFinite(end) || !Number.isFinite(current)) return false;\n  if (end - current > MAX_WINDOW_HOURS * HOUR + SKEW_MS) return false;\n  return end > current;\n}\n\n// Freno anti-bucles: true si la última respuesta automática a esta persona\n// fue hace menos de loop_minutes. En el límite exacto ya no frena.\n// Un lastAutoAt ilegible o en el futuro frena (por seguridad).\nfunction isLoopHeld(lastAutoAt, now, minutes) {\n  if (lastAutoAt === null || lastAutoAt === undefined || lastAutoAt === '') return false;\n  const last = toMs(lastAutoAt);\n  const current = nowMs(now);\n  if (!Number.isFinite(last) || !Number.isFinite(current)) return true;\n  const elapsed = current - last;\n  if (elapsed < 0) return true;\n  return elapsed < minutes * 60 * 1000;\n}\n\n// --- Salida del modelo -------------------------------------------------------\n\nfunction llmText(llm) {\n  if (llm === null || llm === undefined) return null;\n  if (typeof llm === 'string') return llm;\n  if (typeof llm !== 'object') return null;\n  if (Array.isArray(llm.choices)) {\n    const message = llm.choices[0] && llm.choices[0].message;\n    return message && typeof message.content === 'string' ? message.content : null;\n  }\n  if (typeof llm.content === 'string' && !('category' in llm)) return llm.content;\n  return llm;\n}\n\n// Esquema estricto: exactamente las cuatro claves, categoría permitida,\n// confianza número (o texto numérico simple) entre 0 y 1, textos en string.\n// JSON rodeado de prosa → inválido. Se admite una sola valla ```json.\nfunction parseModelOutput(llm) {\n  let value = llmText(llm);\n  if (value === null) return { ok: false, error: 'sin_salida' };\n  if (typeof value === 'string') {\n    let raw = value.trim();\n    if (raw.length > 20000) return { ok: false, error: 'demasiado_largo' };\n    const fenced = raw.match(/^```(?:json)?\\s*\\n?([\\s\\S]*?)\\n?\\s*```$/i);\n    if (fenced) raw = fenced[1].trim();\n    try {\n      value = JSON.parse(raw);\n    } catch (error) {\n      return { ok: false, error: 'no_parsea' };\n    }\n  }\n  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'no_es_objeto' };\n  const keys = Object.keys(value);\n  const extra = keys.filter((key) => !KEYS.includes(key));\n  if (extra.length > 0) return { ok: false, error: 'claves_extra:' + extra.slice(0, 5).join(',') };\n  const missing = KEYS.filter((key) => !keys.includes(key));\n  if (missing.length > 0) return { ok: false, error: 'faltan:' + missing.join(',') };\n  if (typeof value.category !== 'string' || !CATEGORIES.includes(value.category.trim())) return { ok: false, error: 'categoria' };\n  let confidence = value.confidence;\n  if (typeof confidence === 'string' && /^\\s*(0(\\.\\d{1,6})?|1(\\.0{1,6})?|\\.\\d{1,6})\\s*$/.test(confidence)) confidence = Number(confidence);\n  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) return { ok: false, error: 'confianza' };\n  if (typeof value.draft_reply !== 'string') return { ok: false, error: 'draft_reply' };\n  if (typeof value.reasoning !== 'string') return { ok: false, error: 'reasoning' };\n  return {\n    ok: true,\n    value: {\n      category: value.category.trim(),\n      confidence,\n      // Como en el ep3: tope de 4000 caracteres (lo que pase de 1000 bytes ya va a aprobación).\n      draft: Array.from(value.draft_reply.trim()).slice(0, 4000).join(''),\n      reasoning: value.reasoning.trim().slice(0, 1000),\n    },\n  };\n}\n\n// --- Comprobaciones del borrador y de las fuentes ----------------------------\n\nfunction topicList(cfg) {\n  const configured = String((cfg && cfg.sensitive_topics) || '').trim();\n  return (configured || DEFAULT_SENSITIVE)\n    .split(',')\n    .map((item) => normalize(item).trim())\n    .filter(Boolean);\n}\n\n// Por palabra o frase, sin tildes, con plural simple (s/es).\nfunction findSensitive(text, topics) {\n  const haystack = normalize(text);\n  return topics.filter((topic) => {\n    const body = topic.split(/[^a-z0-9]+/).filter(Boolean).map(escapeRegex).join('[^a-z0-9]+');\n    if (!body) return false;\n    return new RegExp('(^|[^a-z0-9])' + body + '(s|es)?($|[^a-z0-9])').test(haystack);\n  });\n}\n\nconst REFUND_PATTERNS = [\n  /\\b(te|os|le|les) (devolvemos|devolveremos|reembolsamos|reembolsaremos|abonamos|abonaremos|regalamos|descontamos)\\b/,\n  /\\breembolso (aprobado|completo|integro|total|garantizado)\\b/,\n  /\\b(devolucion|reembolso) (garantizad[ao]|asegurad[ao])\\b/,\n  /\\b(hemos|he) (abonado|reembolsado|devuelto el dinero)\\b/,\n  /\\b(refund(ed)?|we will refund|money back|full refund)\\b/,\n];\nconst PROMISE_PATTERNS = [\n  /\\d+([.,]\\d+)?\\s?(€|eur\\b|euros?\\b|usd\\b|\\$|dolares\\b|libras\\b|£)|(€|\\$|£)\\s?\\d/,\n  /\\b\\d{1,3}\\s?%\\s?(de )?(descuento|dto|off)\\b|\\b(descuento|rebaja|oferta) del? \\d/,\n  /\\b(en|dentro de|antes de) (menos de )?(\\d+|un|una|dos|tres|cuatro|cinco|seis|siete) (minutos|horas|h|dias|dias habiles|dias laborables|semanas|meses)\\b/,\n  /\\b(te|os|le|les) (lo |la |los |las )?(enviamos|enviaremos|mandamos|mandaremos|entregamos|entregaremos|llegara|llegaran|tendras|tendreis) (manana|hoy|esta semana|en \\d+)/,\n  /\\b(garantizamos|te garantizo|os garantizamos|te aseguro|os aseguro|te prometo|prometemos|aseguramos|we guarantee|we promise|i promise)\\b/,\n  /\\b(within|in) (\\d+|one|two|three) (hours|days|weeks)\\b/,\n  /\\bplazo (de|maximo de) \\d+/,\n];\n\n// Promesas de dinero o plazos. Un reembolso nunca se permite; el resto solo\n// si el mismo trozo aparece tal cual en las fuentes.\nfunction findPromise(draft, sourcesBlob) {\n  const text = normalize(draft);\n  if (REFUND_PATTERNS.some((regex) => regex.test(text))) return true;\n  return PROMISE_PATTERNS.some((regex) => {\n    const match = text.match(regex);\n    return Boolean(match) && !sourcesBlob.includes(match[0].trim());\n  });\n}\n\nconst LEAK_PATTERNS = [\n  /mensaje[\\s_-]*no[\\s_-]*confiable/,\n  /fuentes[\\s_-]*rag/,\n  /\\b(draft_reply|consulta_frecuente|fuera_de_base)\\b/,\n  /\"?\\b(category|confidence|reasoning)\\b\"?\\s*:/,\n  /\\b(esquema exacto|reglas del borrador|prompt de sistema|system prompt|instrucciones de sistema|instrucciones del sistema|mis instrucciones|my instructions|my system)\\b/,\n  /\\b(eres el asistente que clasifica|tu unica salida es un objeto json)\\b/,\n  /\\b(soy un modelo de lenguaje|como modelo de lenguaje|as an ai language model|i am an ai language model)\\b/,\n  /<\\s*\\/?\\s*(system|sistema|assistant|im_start|im_end)\\b|<\\|[a-z_]+\\|>/,\n];\nconst SHINGLE = 7;\n\nfunction words(text) {\n  return normalize(text).split(/[^a-z0-9]+/).filter(Boolean);\n}\n\n// Fuga del prompt: marcas, frases propias o 7 palabras seguidas del prompt de\n// sistema (cfg.prompt, el mismo texto que se manda al modelo).\nfunction leaksPrompt(draft, promptText) {\n  const text = normalize(draft);\n  if (LEAK_PATTERNS.some((regex) => regex.test(text))) return true;\n  if (!promptText) return false;\n  const promptWords = words(promptText);\n  if (promptWords.length < SHINGLE) return false;\n  const grams = new Set();\n  for (let i = 0; i + SHINGLE <= promptWords.length; i += 1) grams.add(promptWords.slice(i, i + SHINGLE).join(' '));\n  const draftWords = words(draft);\n  for (let i = 0; i + SHINGLE <= draftWords.length; i += 1) {\n    if (grams.has(draftWords.slice(i, i + SHINGLE).join(' '))) return true;\n  }\n  return false;\n}\n\nconst TLDS = 'com|es|net|org|io|co|me|ly|app|dev|info|xyz|link|site|online|shop|store|biz|eu|us|uk|de|fr|it|pt|mx|ar|cl|ai|gg|tv|to|cc|ws|click|top|live|page|tk|ml|ga|cf|gq|ru|cn|in|example|cat|gal|eus|ink|lat|pro|club|vip|work|icu|su';\nconst URL_RE = /(?:https?|hxxps?):\\/\\/[^\\s<>\"'`]+|www\\.[^\\s<>\"'`]+/giu;\nconst DOMAIN_RE = new RegExp('(?<![\\\\p{L}\\\\p{N}@.\\\\-/])(?:[\\\\p{L}\\\\p{N}](?:[\\\\p{L}\\\\p{N}-]{0,61}[\\\\p{L}\\\\p{N}])?\\\\.)+(?:' + TLDS + ')(?![\\\\p{L}\\\\p{N}-])(?:/[^\\\\s<>\"\\'`]*)?', 'giu');\nconst OBFUSCATED_RE = /[\\p{L}\\p{N}-]+\\s*(\\[\\.\\]|\\(\\.\\)|\\[punto\\]|\\(punto\\)|\\[dot\\]|\\(dot\\)|\\s+punto\\s+|\\s+dot\\s+)\\s*[a-z]{2,10}\\b/giu;\nconst EMAIL_RE = /[\\p{L}\\p{N}._%+-]+@[\\p{L}\\p{N}-]+(?:\\.[\\p{L}\\p{N}-]+)+/gu;\nconst HANDLE_RE = /(?:^|[^\\p{L}\\p{N}_@.])@([\\p{L}\\p{N}._]{2,30})/gu;\nconst PHONE_RE = /\\+?\\d[\\d ().-]{7,}\\d/g;\n\nfunction cleanLink(value) {\n  return value\n    .toLowerCase()\n    .replace(/^(?:https?|hxxps?):\\/\\//, '')\n    .replace(/^www\\./, '')\n    .replace(/[.,;:!?)\\]}»\"'’]+$/, '')\n    .replace(/\\/+$/, '');\n}\n\nfunction linksOf(text) {\n  const source = String(text ?? '').normalize('NFKC');\n  const out = { links: [], emails: [], handles: [], phones: [], obfuscated: false };\n  let rest = source;\n  for (const match of source.match(EMAIL_RE) || []) {\n    out.emails.push(match.toLowerCase());\n    rest = rest.split(match).join(' ');\n  }\n  for (const match of rest.match(URL_RE) || []) {\n    out.links.push(cleanLink(match));\n    rest = rest.split(match).join(' ');\n  }\n  for (const match of rest.match(DOMAIN_RE) || []) out.links.push(cleanLink(match));\n  for (const match of rest.matchAll(HANDLE_RE)) out.handles.push(match[1].toLowerCase().replace(/\\.+$/, ''));\n  for (const match of rest.match(PHONE_RE) || []) {\n    const digits = match.replace(/\\D/g, '');\n    if (digits.length >= 9) out.phones.push(digits);\n  }\n  out.obfuscated = OBFUSCATED_RE.test(source);\n  OBFUSCATED_RE.lastIndex = 0;\n  // Dominio con homoglifos (latín mezclado con cirílico o griego): \"exаmple\".\n  if (source.split(/\\s+/).some((token) => token.includes('.') && /\\p{Script=Latin}/u.test(token) && /[\\p{Script=Cyrillic}\\p{Script=Greek}]/u.test(token))) {\n    out.obfuscated = true;\n  }\n  return out;\n}\n\n// true si el borrador trae algo que no aparece en las fuentes.\nfunction hasForeignLinks(draft, sources) {\n  const found = linksOf(draft);\n  if (found.obfuscated) return true;\n  const allowed = { links: new Set(), hosts: new Set(), emails: new Set(), handles: new Set(), phones: new Set() };\n  for (const source of sources) {\n    const blob = [source.canonical_url, source.title, source.content].map((v) => String(v ?? '')).join('\\n');\n    const own = linksOf(blob);\n    own.links.forEach((link) => {\n      allowed.links.add(link);\n      allowed.hosts.add(link.split('/')[0]);\n    });\n    own.emails.forEach((email) => allowed.emails.add(email));\n    own.handles.forEach((handle) => allowed.handles.add(handle));\n    own.phones.forEach((phone) => allowed.phones.add(phone));\n  }\n  const linkOk = (link) => allowed.links.has(link) || (!link.includes('/') && allowed.hosts.has(link));\n  return found.links.some((link) => !linkOk(link))\n    || found.emails.some((email) => !allowed.emails.has(email))\n    || found.handles.some((handle) => !allowed.handles.has(handle))\n    || found.phones.some((phone) => !allowed.phones.has(phone));\n}\n\nconst FORMAT_PATTERNS = [\n  /\\*\\*[^*\\n]+\\*\\*/, /__[^_\\n]+__/, /(^|\\n)\\s{0,3}#{1,6}\\s/, /\\[[^\\]\\n]+\\]\\([^)\\n]+\\)/, /```|`[^`\\n]+`/, /<\\/?[a-z][^>]*>/i,\n];\n\nfunction hasFormatting(draft) {\n  return FORMAT_PATTERNS.some((regex) => regex.test(draft));\n}\n\n// Instrucciones o marcas dentro de una fuente del RAG (fuente envenenada).\nconst SOURCE_PATTERNS = [\n  /<\\s*\\/?\\s*(mensaje_no_confiable|fuentes_rag|system|sistema|assistant|asistente|im_start|im_end)\\b|<\\|[a-z_]+\\|>|\\[\\/?inst\\]/,\n  /\\b(ignora|ignore|olvida|forget|disregard|omite|override)\\b[^.\\n]{0,40}\\b(instrucciones|reglas|instructions|rules|prompt)\\b/,\n  /\\b(system prompt|prompt de sistema|you are now|ahora eres|eres ahora|actua como si|act as if|from now on|a partir de ahora (eres|responde|debes))\\b/,\n  /\\b(nota|instruccion|mensaje) para (la ia|el asistente|el modelo|el bot)\\b|\\bnote (to|for) (the )?(ai|assistant|model|bot)\\b|\\b(si eres|if you are) (una ia|un modelo|un asistente|an ai|a language model|an assistant)\\b/,\n  /\\b(responde|contesta|reply|respond|answer)\\b[^.\\n]{0,25}\\b(siempre|always)\\b[^.\\n]{0,25}\\b(con|with)\\b/,\n];\n\nfunction poisonedSources(sources) {\n  return sources.some((source) => {\n    const text = normalize([source.title, source.content].map((v) => String(v ?? '')).join('\\n'));\n    return SOURCE_PATTERNS.some((regex) => regex.test(text));\n  });\n}\n\n// Como en el episodio 3: las palabras de 5+ letras de la pregunta tienen que\n// aparecer en las dos primeras fuentes (2 aciertos, o 1 si la pregunta es corta).\nfunction coversQuestion(body, sources) {\n  const tokens = normalize(body).split(/[^a-z0-9]+/).filter((word) => word.length > 4);\n  if (tokens.length === 0) return false;\n  const blob = normalize((sources || []).slice(0, 2).map((source) => `${source.title || ''} ${source.content || ''}`).join(' '));\n  const hits = tokens.filter((word) => blob.includes(word));\n  return hits.length >= 2 || (hits.length === 1 && tokens.length <= 3);\n}\n\nfunction numberOr(value, fallback, min, max) {\n  if (value === null || value === undefined || value === '') return fallback;\n  const number = Number(value);\n  if (!Number.isFinite(number)) return fallback;\n  return Math.min(max, Math.max(min, number));\n}\n\n// --- Decisión ----------------------------------------------------------------\n\nfunction decide(input) {\n  const args = input || {};\n  const cfg = args.cfg || {};\n  const inspection = args.inspection || {};\n  // Umbral efectivo: nunca por debajo de 0,5 aunque Configuración diga otra cosa.\n  const threshold = numberOr(cfg.confidence_threshold, 0.75, 0.5, 1);\n  const minScore = numberOr(cfg.min_rag_score, 0.45, 0, 1);\n  const loopMinutes = numberOr(cfg.loop_minutes, 10, 1, 24 * 60);\n  const sources = (Array.isArray(args.sources) ? args.sources : []).filter((s) => s && typeof s === 'object');\n  let topScore = Number(args.topScore);\n  if (!Number.isFinite(topScore)) topScore = sources.length ? Math.max(...sources.map((s) => Number(s.score) || 0)) : 0;\n  const message = String(inspection.sanitized ?? '');\n  const injectionIn = Boolean(inspection.injection);\n  const windowOpen = isWindowOpen(args.window && args.window.expiresAt, args.now);\n  const loopHeld = isLoopHeld(args.lastAutoAt, args.now, loopMinutes);\n  const parsed = parseModelOutput(args.llm);\n  const model = parsed.ok ? parsed.value : { category: '', confidence: 0, draft: '', reasoning: '' };\n\n  const base = {\n    category: model.category || null,\n    confidence: model.confidence,\n    reasoning: model.reasoning,\n    windowOpen,\n    loopHeld,\n    jsonError: parsed.ok ? '' : parsed.error,\n  };\n  // El título del aviso en Telegram (format.js, blockedTitle) sale del principio\n  // del razonamiento, como en el episodio 3.\n  const why = (reasons) => {\n    if (reasons.includes('inyeccion')) return 'El mensaje intenta dar instrucciones al sistema.';\n    if (reasons.includes('promesa')) return 'El borrador prometía una devolución, un descuento o un plazo que no está en la base de conocimiento.';\n    if (reasons.includes('fuga_prompt')) return 'El borrador repetía instrucciones internas.';\n    if (reasons.includes('enlace_ajeno')) return 'El borrador traía un enlace o un contacto que no está en las fuentes.';\n    if (reasons.includes('fuente_sospechosa')) return 'Una fuente de la base de conocimiento trae instrucciones o marcas (posible fuente envenenada).';\n    return '';\n  };\n  const finish = (route, reasons, extra) => {\n    const blocked = Boolean(extra.blocked);\n    const draft = route === 'ignore' || blocked ? '' : model.draft;\n    let reasoning = model.reasoning;\n    if (!parsed.ok) reasoning = 'El modelo no devolvió JSON válido (' + parsed.error + '). Pasa a una persona.';\n    if (blocked) reasoning = (why(reasons) + ' No hay borrador: responde con Editar o rechaza. ' + reasoning).trim().slice(0, 1000);\n    return {\n      route,\n      reasons,\n      ...base,\n      reasoning,\n      draft,\n      draftBytes: utf8Bytes(draft),\n      sensitive: Boolean(extra.sensitive),\n      injection: injectionIn || blocked,\n      blocked,\n    };\n  };\n\n  // 1. Ventana cerrada: no se puede contestar. Ni borrador ni botón Aprobar.\n  //    Si además hubo inyección, se marca para que el flujo lo registre y avise.\n  if (!windowOpen) {\n    const reasons = ['ventana_cerrada'];\n    if (injectionIn) reasons.push('inyeccion');\n    return finish('ignore', reasons, { blocked: injectionIn });\n  }\n  // 2. Sin texto (y sin inyección): se ignora y se registra.\n  if (inspection.ignore && !injectionIn) return finish('ignore', ['sin_texto'], {});\n\n  const reasons = [];\n  const add = (code) => { if (!reasons.includes(code)) reasons.push(code); };\n  let blocked = false;\n  if (injectionIn) { add('inyeccion'); blocked = true; }\n  // JSON roto: sin borrador (no hay nada que aprobar), pero no \"bloqueado\".\n  if (!parsed.ok) add('json_invalido');\n\n  // 3. Spam limpio: no se contesta. Con inyección, a una persona.\n  if (parsed.ok && model.category === 'spam' && !injectionIn) return finish('ignore', ['spam'], {});\n\n  const topics = topicList(cfg);\n  // Solo mensaje y borrador, como en el ep3: la FAQ llega en un único chunk que menciona\n  // garantía, y mirar las fuentes mandaría a aprobación hasta «¿a qué hora abrís?».\n  const sensitiveHits = findSensitive([message, model.draft].join('\\n'), topics);\n  const sensitive = sensitiveHits.length > 0;\n\n  if (poisonedSources(sources)) { add('fuente_sospechosa'); blocked = true; }\n  if (parsed.ok) {\n    if (model.category !== 'consulta_frecuente') add('categoria');\n    if (sensitive) add('sensible');\n    if (model.confidence < threshold) add('confianza_baja');\n  } else if (sensitive) {\n    add('sensible');\n  }\n  if (sources.length === 0 || topScore < minScore) add('rag_bajo');\n  if (!coversQuestion(message, sources)) add('no_cubre');\n  if (parsed.ok) {\n    const sourcesBlob = normalize(sources.map((s) => `${s.title || ''}\\n${s.content || ''}`).join('\\n'));\n    if (!model.draft) add('sin_borrador');\n    else {\n      if (findPromise(model.draft, sourcesBlob)) { add('promesa'); blocked = true; }\n      if (leaksPrompt(model.draft, cfg.prompt)) { add('fuga_prompt'); blocked = true; }\n      if (hasForeignLinks(model.draft, sources)) { add('enlace_ajeno'); blocked = true; }\n      if (hasFormatting(model.draft)) add('formato');\n      if (utf8Bytes(model.draft) > MAX_BYTES) add('borrador_largo');\n    }\n  }\n  if (loopHeld) add('bucle');\n\n  return finish(reasons.length === 0 ? 'auto' : 'approval', reasons, { blocked, sensitive });\n}\n\nconst config = $('Configuración').first().json;\nconst hint = 'No se ha enviado. ¿Está activo IG 04 (ig-send)? ¿n8n_url y la credencial Instagram API Key cuadran? Cuando esté, pulsa Aprobar otra vez: si editaste, sale tu texto.';\nconst row = { ...$json, reason_labels: REASONS };\nconst restore = Boolean($json.id) && String($json.telegram_chat_id || '') !== '' && String($json.telegram_message_id || '') !== '';\nconst label = $json.on_failure_message && $json.last_send_error ? 'Reintentar' : 'Aprobar';\nconst base = $json.on_failure_message && $json.last_send_error ? sendFailureMessage(row, $json.last_send_error) : approvalMessage(row, new Date());\nconst restoreText = restore ? withResult(base, resultLine('fallo_04', { when: madridTime(new Date()), tail: 'Pulsa ' + label + ' otra vez cuando esté.' })) : '';\nreturn { json: { id: $json.id || '', chat_id: String(config.telegram_chat_id), text: failureMessage('IG 04 no recibió el envío', { ...$json, hint }, $json.fallo), restore, restore_chat_id: $json.telegram_chat_id || '', restore_message_id: $json.telegram_message_id || '', restore_text: restoreText, approve_label: label } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "57baac56-c575-5658-9bb4-0b8f17baf587",
+      "name": "Texto fallo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4440,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.restore }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "38600d2b-2141-5380-bfe0-6edce7828dca",
+      "name": "¿Devolver botones?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4660,
+        100
+      ],
+      "notes": "Solo si la fila volvió a esperar y tiene mensaje. Las dos salidas siguen al aviso."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "editMessageText",
+        "messageType": "message",
+        "chatId": "={{ $('Texto fallo').item.json.restore_chat_id }}",
+        "messageId": "={{ $('Texto fallo').item.json.restore_message_id }}",
+        "text": "={{ $('Texto fallo').item.json.restore_text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $('Texto fallo').item.json.approve_label }}",
+                    "additionalFields": {
+                      "callback_data": "={{ 'ig:approve:' + $('Texto fallo').item.json.id }}"
+                    }
+                  },
+                  {
+                    "text": "Editar",
+                    "additionalFields": {
+                      "callback_data": "={{ 'ig:edit:' + $('Texto fallo').item.json.id }}"
+                    }
+                  },
+                  {
+                    "text": "Rechazar",
+                    "additionalFields": {
+                      "callback_data": "={{ 'ig:reject:' + $('Texto fallo').item.json.id }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "c90be2c4-9e06-5bd5-976a-92d0d551873c",
+      "name": "Devolver botones",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4880,
+        20
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "notes": "El mensaje vuelve a tener Aprobar (o Reintentar), Editar y Rechazar.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ /^-?\\d{1,20}$/.test(String($('Configuración').first().json.telegram_chat_id || '').trim()) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a4672198-5bdd-5938-873d-afa4c630ef2c",
+      "name": "¿Telegram? (fallo)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5100,
+        100
+      ],
+      "notes": "Sin chat configurado (cambia-esto) no se manda nada a Telegram: queda el rastro en ig_actions."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Texto fallo').item.json.chat_id }}",
+        "text": "={{ $('Texto fallo').item.json.text }}",
+        "replyMarkup": "none",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false,
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "29c244b0-f1f0-5a58-8496-a7c583ded168",
+      "name": "Avisar fallo",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        5320,
+        100
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.kind }}",
+              "rightValue": "foreign",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "997c295c-9061-5bc2-8dc4-11703328509a",
+      "name": "¿Ajeno?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1360,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ig_actions (message_id, action, detail)\nVALUES (NULL, 'telegram_ajeno', jsonb_build_object('tipo', $1::text, 'chat_id', $2::text, 'from_id', $3::text, 'motivo', $4::text))\nRETURNING id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.callbackId ? 'boton' : 'texto', $json.chatId, $json.fromId, $json.reason] }}"
+        }
+      },
+      "id": "a9cb924f-a979-5f9f-80fc-314d84e4e9ee",
+      "name": "Registrar ajeno",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1580,
+        760
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Chat o persona no autorizados: no se contesta ni se toca ninguna fila. Solo queda apuntado.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.callbackId !== '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ecde339d-5f70-5ecb-934b-2998e626028f",
+      "name": "¿Botón no válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1580,
+        900
+      ],
+      "notes": "Del chat autorizado pero con un callback_data que no es ig:<acción>:<uuid>."
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.callbackId }}",
+        "additionalFields": {
+          "text": "Botón no válido. No se hace nada.",
+          "show_alert": true
+        }
+      },
+      "id": "5995eb85-992e-5d76-a62a-d66ea3f6628e",
+      "name": "Responder no válido",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1800,
+        900
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Telegram": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Probar botón": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuración": {
+      "main": [
+        [
+          {
+            "node": "Leer update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer update": {
+      "main": [
+        [
+          {
+            "node": "¿Botón?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Botón?": {
+      "main": [
+        [
+          {
+            "node": "Leer fila",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Texto?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer fila": {
+      "main": [
+        [
+          {
+            "node": "Qué hacer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qué hacer": {
+      "main": [
+        [
+          {
+            "node": "¿Aplicar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Aplicar?": {
+      "main": [
+        [
+          {
+            "node": "Aplicar botón",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Texto del botón",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aplicar botón": {
+      "main": [
+        [
+          {
+            "node": "¿Aplicado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Aplicado?": {
+      "main": [
+        [
+          {
+            "node": "Aplicado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Releer fila",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aplicado": {
+      "main": [
+        [
+          {
+            "node": "Texto del botón",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Releer fila": {
+      "main": [
+        [
+          {
+            "node": "Sin cambios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sin cambios": {
+      "main": [
+        [
+          {
+            "node": "Texto del botón",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texto del botón": {
+      "main": [
+        [
+          {
+            "node": "Responder botón",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder botón": {
+      "main": [
+        [
+          {
+            "node": "¿Quitar botones?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Quitar botones?": {
+      "main": [
+        [
+          {
+            "node": "Quitar botones",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Enviar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quitar botones": {
+      "main": [
+        [
+          {
+            "node": "¿Enviar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Enviar?": {
+      "main": [
+        [
+          {
+            "node": "Pedir envío",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Editar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pedir envío": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallo envío",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallo envío": {
+      "main": [
+        [
+          {
+            "node": "Deshacer aprobación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Editar?": {
+      "main": [
+        [
+          {
+            "node": "Pedir texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pedir texto": {
+      "main": [
+        [
+          {
+            "node": "Guardar edición",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Texto?": {
+      "main": [
+        [
+          {
+            "node": "Ediciones pendientes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Ajeno?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ediciones pendientes": {
+      "main": [
+        [
+          {
+            "node": "Qué texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qué texto": {
+      "main": [
+        [
+          {
+            "node": "Responder texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder texto": {
+      "main": [
+        [
+          {
+            "node": "¿Guardar texto?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Guardar texto?": {
+      "main": [
+        [
+          {
+            "node": "Guardar texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar texto": {
+      "main": [
+        [
+          {
+            "node": "¿Texto guardado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Texto guardado?": {
+      "main": [
+        [
+          {
+            "node": "Pedir envío editado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pedir envío editado": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallo editado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallo editado": {
+      "main": [
+        [
+          {
+            "node": "Deshacer aprobación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deshacer aprobación": {
+      "main": [
+        [
+          {
+            "node": "Texto fallo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texto fallo": {
+      "main": [
+        [
+          {
+            "node": "¿Devolver botones?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Devolver botones?": {
+      "main": [
+        [
+          {
+            "node": "Devolver botones",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Telegram? (fallo)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Devolver botones": {
+      "main": [
+        [
+          {
+            "node": "¿Telegram? (fallo)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Telegram? (fallo)": {
+      "main": [
+        [
+          {
+            "node": "Avisar fallo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Ajeno?": {
+      "main": [
+        [
+          {
+            "node": "Registrar ajeno",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Botón no válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Botón no válido?": {
+      "main": [
+        [
+          {
+            "node": "Responder no válido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,354 @@
+{
+  "name": "IG 02b - Reintentos",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "### IG 02b Reintentos\n\nCada 5 minutos (o con el botón):\n1. **Rescata** filas atascadas en `procesando` más de 15 min (una ejecución de IG 02 que murió): vuelven a `reintento` o, si ya van por `max_attempts`, a `error`.\n2. **Vence** los `reintento` de más de `window_days` días: pasan a `error` (motivo `ventana_7_dias`). Meta ya no deja la respuesta privada.\n3. **Reclama** hasta 20 `reintento` con `next_attempt_at` vencido (UPDATE atómico a `procesando`) y llama a IG 02 con `{retry:true, comment_id}`.\n\nLa espera entre intentos la fija IG 02 (1, 2, 5, 15, 60, 240 min).",
+        "height": 300,
+        "width": 640,
+        "color": 5
+      },
+      "id": "8d47dc54-12a5-500c-bb74-2a8c67c63509",
+      "name": "Notas reintentos",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        80,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "cbb90759-bc03-5075-9861-567024531596",
+      "name": "Cada 5 minutos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        220,
+        260
+      ],
+      "notes": "Cada 5 minutos."
+    },
+    {
+      "parameters": {},
+      "id": "6cf6cd0a-03d5-5f1a-96e6-4fadfc2507ad",
+      "name": "Reintentar ahora",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        460
+      ],
+      "notes": "Para enseñarlo en cámara sin esperar."
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a3fe0c65-53b9-570f-aac6-79902e7faa1e",
+              "name": "window_days",
+              "value": 7,
+              "type": "number"
+            },
+            {
+              "id": "40dc8edf-4689-5d16-b278-7d99b38bf42f",
+              "name": "max_attempts",
+              "value": 6,
+              "type": "number"
+            },
+            {
+              "id": "8969e8c2-96aa-53e0-99e6-3f811d9327b0",
+              "name": "n8n_url",
+              "value": "http://localhost:5678",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "73b5a6eb-2f52-59b3-ae51-b4b0657265ac",
+      "name": "Configuración",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        460,
+        360
+      ],
+      "notes": "Valores que se ven en cámara. El .env no entra aquí: Coolify bloquea $env. Los secretos NO van aquí."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH stuck AS (\n  UPDATE ig_comments\n  SET status = CASE WHEN attempts + 1 >= $1::integer THEN 'error' ELSE 'reintento' END,\n      attempts = attempts + 1,\n      next_attempt_at = CASE WHEN attempts + 1 >= $1::integer THEN NULL ELSE now() END,\n      last_error = jsonb_build_object('reason', CASE WHEN attempts + 1 >= $1::integer THEN 'max_intentos' ELSE 'atascado' END)\n  WHERE status = 'procesando' AND updated_at < now() - interval '15 minutes'\n  RETURNING id, status\n), act AS (\n  INSERT INTO ig_actions (comment_id, action, detail)\n  SELECT id, 'rescatado', jsonb_build_object('status', status) FROM stuck\n  RETURNING id\n)\nSELECT count(*)::integer AS rescued FROM stuck",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.max_attempts] }}"
+        }
+      },
+      "id": "dd7a63b0-2c06-58ff-8d53-ef9716be7e5f",
+      "name": "Rescatar",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        700,
+        360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Una ejecución de IG 02 que murió a medias dejaría la fila en procesando para siempre.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH expired AS (\n  UPDATE ig_comments\n  SET status = 'error', next_attempt_at = NULL,\n      last_error = COALESCE(last_error, '{}'::jsonb) || jsonb_build_object('reason', 'ventana_7_dias')\n  WHERE status = 'reintento' AND created_at <= now() - ($1::numeric * interval '1 day')\n  RETURNING id\n), act AS (\n  INSERT INTO ig_actions (comment_id, action, detail)\n  SELECT id, 'ventana_vencida', jsonb_build_object('reason', 'ventana_7_dias') FROM expired\n  RETURNING id\n)\nSELECT count(*)::integer AS expired FROM expired",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$('Configuración').first().json.window_days] }}"
+        }
+      },
+      "id": "2c8fb7d0-1d25-561d-a929-a0684c5fa735",
+      "name": "Vencer",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        940,
+        360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Pasados los 7 días Meta ya no acepta la respuesta privada.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH due AS (\n  SELECT id FROM ig_comments\n  WHERE status = 'reintento' AND next_attempt_at <= now()\n    AND created_at > now() - ($1::numeric * interval '1 day')\n  ORDER BY next_attempt_at\n  LIMIT 20\n  FOR UPDATE SKIP LOCKED\n), claimed AS (\n  UPDATE ig_comments c SET status = 'procesando'\n  FROM due\n  WHERE c.id = due.id AND c.status = 'reintento'\n  RETURNING c.comment_id\n)\nSELECT COALESCE(jsonb_agg(comment_id), '[]'::jsonb) AS ids FROM claimed",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$('Configuración').first().json.window_days] }}"
+        }
+      },
+      "id": "74b69b98-29ca-55a2-85dc-b6f72054f7ca",
+      "name": "Reclamar",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1180,
+        360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "UPDATE atómico reintento → procesando con LIMIT 20: dos ejecuciones a la vez no se pisan.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.ids;\nconst ids = typeof raw === 'string' ? JSON.parse(raw) : (raw || []);\nreturn ids.map((id) => ({ json: { comment_id: String(id) } }));\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "1d38ae02-a87e-5a3f-9ebd-1477696cdf36",
+      "name": "Separar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        360
+      ],
+      "notes": "Un item por comentario reclamado. Sin ninguno, se acaba aquí."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuración').first().json.n8n_url.replace(/\\/$/, '') + '/webhook/ig-comment' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ retry: true, comment_id: $json.comment_id }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "8d61398d-59ff-5a2f-b8e7-aaa34144bdd5",
+      "name": "Reintentar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1660,
+        360
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "IG 02 reutiliza la fila (misma idempotencia). Responde al instante.",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE ig_comments\nSET status = 'reintento', next_attempt_at = now() + interval '5 minutes'\nWHERE comment_id = $1::text AND status = 'procesando'\nRETURNING id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$('Separar').item.json.comment_id] }}"
+        }
+      },
+      "id": "653502bf-5805-51c0-8401-ac873bdfecee",
+      "name": "Devolver a reintento",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1900,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Si IG 02 no contesta (flujo apagado, n8n reiniciando), la fila no se queda atascada: vuelve a la cola sin gastar un intento.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Cada 5 minutos": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reintentar ahora": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuración": {
+      "main": [
+        [
+          {
+            "node": "Rescatar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rescatar": {
+      "main": [
+        [
+          {
+            "node": "Vencer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vencer": {
+      "main": [
+        [
+          {
+            "node": "Reclamar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reclamar": {
+      "main": [
+        [
+          {
+            "node": "Separar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Separar": {
+      "main": [
+        [
+          {
+            "node": "Reintentar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reintentar": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Devolver a reintento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

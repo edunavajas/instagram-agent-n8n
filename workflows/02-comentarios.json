@@ -1,0 +1,1111 @@
+{
+  "name": "IG 02 - Comentarios",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "### IG 02 Comentarios\n\nRecibe de IG 01 un comentario ya normalizado (o de IG 02b un reintento `{retry:true, comment_id}`). **Sin IA**.\n\n1. Reglas activas de `ig_keywords` + `matchKeyword` (palabra completa, sin acentos ni emojis). **Sin coincidencia no se escribe nada** en la base (solo queda la ejecución de n8n).\n2. Con coincidencia: `ig_comments` en `procesando` (comment_id único: idempotente). Una privada por usuario y publicación.\n3. **Primero la respuesta privada** (la crítica: una sola, dentro de 7 días) vía IG 08; después la pública con variante rotada. Si la pública falla no se bloquea nada: queda anotado.\n4. Error de límite o temporal: `reintento` con espera creciente (IG 02b) mientras no pasen 7 días ni `max_attempts`. Otro error: `error` + aviso a Telegram (uno por tipo cada 10 min).",
+        "height": 340,
+        "width": 700,
+        "color": 5
+      },
+      "id": "110b6df2-41fe-563f-96aa-9948449e6fb3",
+      "name": "Notas comentarios",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        80,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ig-comment",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "cf258502-a229-5b25-9e54-fe20b4d40ca9",
+      "name": "Webhook comentario",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        220,
+        400
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "POST /webhook/ig-comment (cabecera X-IG-API-Key). Responde al instante y sigue.",
+      "webhookId": "a948df47-6566-5683-a171-550fe8652e8c"
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d144bd2a-8dca-5487-b3a3-077a19ca1c73",
+              "name": "ig_account_id",
+              "value": "cambia-esto",
+              "type": "string"
+            },
+            {
+              "id": "40dc8edf-4689-5d16-b278-7d99b38bf42f",
+              "name": "max_attempts",
+              "value": 6,
+              "type": "number"
+            },
+            {
+              "id": "a3fe0c65-53b9-570f-aac6-79902e7faa1e",
+              "name": "window_days",
+              "value": 7,
+              "type": "number"
+            },
+            {
+              "id": "c4d14efa-84a8-54d4-913c-f742a9949630",
+              "name": "telegram_chat_id",
+              "value": "cambia-esto",
+              "type": "string"
+            },
+            {
+              "id": "8969e8c2-96aa-53e0-99e6-3f811d9327b0",
+              "name": "n8n_url",
+              "value": "http://localhost:5678",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "73b5a6eb-2f52-59b3-ae51-b4b0657265ac",
+      "name": "Configuración",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        460,
+        400
+      ],
+      "notes": "Valores que se ven en cámara. El .env no entra aquí: Coolify bloquea $env. Los secretos NO van aquí."
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $('Configuración').first().json;\nconst body = $json.body || $json;\nconst retry = body.retry === true;\nconst id = String(retry ? (body.comment_id || '') : (body.id || ''));\nconst safeId = /^[A-Za-z0-9_.:-]{1,120}$/.test(id);\nif (retry) return { json: { retry: true, comment_id: id, valid: safeId } };\nconst from = body.from && typeof body.from === 'object' ? body.from : {};\nconst account = String(body.igAccountId || '');\nconst configured = String(config.ig_account_id || '');\nconst ownAccount = !configured || configured === 'cambia-esto' || !account || account === configured;\nconst text = typeof body.text === 'string' ? body.text : '';\nconst valid = body.kind === 'comment' && safeId && Boolean(from.id) && text.trim() !== '' && ownAccount;\nreturn { json: { retry: false, comment_id: id, media_id: String(body.mediaId || ''), igsid: String(from.id || ''), username: String(from.username || ''), text, ts: String(body.ts || ''), valid } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "5c9db634-83d2-5ae0-8f96-d7b4a8800570",
+      "name": "Leer petición",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        400
+      ],
+      "notes": "Valida el evento de IG 01 o la petición de reintento de IG 02b."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0f76676d-587f-55da-a443-da207785f694",
+      "name": "¿Válida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        400
+      ],
+      "notes": "No válida: no se hace nada."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.retry }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e2ed3c0b-a0ba-5fbd-b4d4-083a7722c664",
+      "name": "¿Reintento?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1160,
+        400
+      ],
+      "notes": "Sí: se reutiliza la fila que reclamó IG 02b."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE(jsonb_agg(to_jsonb(k) ORDER BY k.id), '[]'::jsonb) AS rules\nFROM ig_keywords k\nWHERE k.active",
+        "options": {
+          "queryBatching": "independently"
+        }
+      },
+      "id": "7bcea705-c3d9-5144-aaff-a47c901e42fd",
+      "name": "Reglas",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1400,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Siempre devuelve una fila, con o sin reglas.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Palabras clave de los comentarios: normalizar, encontrar la regla, rotar la\n// variante de la respuesta pública y montar el mensaje privado (máx. 1000 bytes).\n// Sin I/O: las reglas (filas de ig_keywords) las pasa el flujo.\n\nconst KW_PRIVATE_MAX_BYTES = 1000;\n\n// Minúsculas, sin diacríticos (NFKD: también pasa \"𝐆𝐔𝐈𝐀\" a \"guia\"), sin emojis ni\n// símbolos (todo lo que no sea letra, marca de letra, número o espacio pasa a\n// espacio; las marcas se conservan para no romper el japonés), sin caracteres invisibles y con los espacios colapsados.\nfunction normalizeText(value) {\n  return String(value === undefined || value === null ? '' : value)\n    .normalize('NFKD')\n    .replace(/[̀-ͯ]/g, '')\n    .replace(/[​-‏⁠⁦-⁩﻿­︀-️⃣]/g, '')\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{M}\\p{N}\\s]/gu, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction kwActive(rule) {\n  return rule && rule.active !== false && String(rule.keyword || '').trim() !== '';\n}\n\nfunction kwHasMedia(rule) {\n  return rule.media_id !== undefined && rule.media_id !== null && String(rule.media_id).trim() !== '';\n}\n\n// Devuelve la regla que encaja o null. Palabra completa o frase completa:\n// \"guia\" encaja en \"la guía, porfa\" pero no en \"guiar\" ni en \"guiado\".\n// Empate: la regla de una publicación concreta gana a la global; luego la\n// palabra más larga; luego el orden en que llegaron.\nfunction matchKeyword(text, rules, mediaId) {\n  const haystack = ` ${normalizeText(text)} `;\n  if (haystack.trim() === '' || !Array.isArray(rules)) return null;\n  const media = mediaId === undefined || mediaId === null ? '' : String(mediaId).trim();\n  let best = null;\n  let bestScore = null;\n  rules.forEach((rule, index) => {\n    if (!kwActive(rule)) return;\n    const needle = normalizeText(rule.keyword);\n    if (!needle || !haystack.includes(` ${needle} `)) return;\n    const specific = kwHasMedia(rule);\n    if (specific && String(rule.media_id).trim() !== media) return;\n    const score = [specific ? 1 : 0, needle.length, -index];\n    if (bestScore === null || kwBetter(score, bestScore)) { best = rule; bestScore = score; }\n  });\n  return best;\n}\n\nfunction kwBetter(a, b) {\n  for (let i = 0; i < a.length; i += 1) {\n    if (a[i] !== b[i]) return a[i] > b[i];\n  }\n  return false;\n}\n\n// Variante número \"counter\" (módulo el nº de variantes). Las vacías no cuentan.\nfunction pickVariant(variants, counter) {\n  const list = (Array.isArray(variants) ? variants : []).map((item) => String(item === null || item === undefined ? '' : item).trim()).filter(Boolean);\n  if (!list.length) return '';\n  const number = Math.trunc(Number(counter));\n  const index = Number.isFinite(number) ? ((number % list.length) + list.length) % list.length : 0;\n  return list[index];\n}\n\nfunction kwBytes(text) {\n  let total = 0;\n  for (const char of String(text)) {\n    const code = char.codePointAt(0);\n    total += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n  }\n  return total;\n}\n\n// Recorta a maxBytes bytes UTF-8 sin partir un carácter.\nfunction kwCut(text, maxBytes) {\n  let total = 0;\n  let out = '';\n  for (const char of String(text)) {\n    const code = char.codePointAt(0);\n    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n    if (total + size > maxBytes) break;\n    total += size;\n    out += char;\n  }\n  return out;\n}\n\n// Mensaje privado de la regla: private_message y, si el enlace no aparece ya en\n// él, el enlace al final. Si no cabe en 1000 bytes se recorta el texto, nunca el enlace.\nfunction buildPrivateMessage(rule) {\n  const message = String((rule && rule.private_message) || '').trim();\n  const link = String((rule && rule.link) || '').trim();\n  if (!link) return kwCut(message, KW_PRIVATE_MAX_BYTES).trimEnd();\n  const full = message.includes(link) ? message : `${message}\\n\\n${link}`.trim();\n  if (kwBytes(full) <= KW_PRIVATE_MAX_BYTES) return full;\n  const suffix = `\\n\\n${link}`;\n  const room = KW_PRIVATE_MAX_BYTES - kwBytes(suffix) - kwBytes('…');\n  if (room <= 0) return kwCut(full, KW_PRIVATE_MAX_BYTES).trimEnd();\n  const head = message.split(link).join('').trim();\n  return `${kwCut(head, room).trimEnd()}…${suffix}`;\n}\n\nconst request = $('Leer petición').item.json;\nconst rules = typeof $json.rules === 'string' ? JSON.parse($json.rules) : ($json.rules || []);\nconst rule = matchKeyword(request.text, rules, request.media_id);\nreturn { json: { ...request, rule: rule || null, matched: Boolean(rule) } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "3edaa8c0-ee60-53da-b41d-3c92a1168f4e",
+      "name": "Coincidencia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        560
+      ],
+      "notes": "Normaliza y busca la palabra clave (la regla de una publicación concreta gana a la global)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.matched }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "426ac4ff-73f9-580a-b61a-312fb8b34363",
+      "name": "¿Coincide?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1880,
+        560
+      ],
+      "notes": "No: no se guarda nada y se acaba."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO ig_comments (comment_id, media_id, igsid, username, text, keyword_id, status, created_at)\n  VALUES ($1::text, NULLIF($2::text, ''), $3::text, NULLIF($4::text, ''), $5::text, $6::bigint, 'procesando',\n          LEAST(COALESCE(NULLIF($7::text, '')::timestamptz, now()), now()))\n  ON CONFLICT (comment_id) DO NOTHING\n  RETURNING id, created_at\n)\nSELECT (SELECT id::text FROM ins) AS id, (SELECT created_at FROM ins) AS created_at",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.comment_id, $json.media_id, $json.igsid, $json.username, $json.text, $json.rule.id, $json.ts] }}"
+        }
+      },
+      "id": "497edc7d-8da6-5174-ae7c-91f6dde487a4",
+      "name": "Reservar",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2120,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "comment_id es único: si ya estaba, otra ejecución lo lleva y esta se acaba. created_at es la hora del comentario (la ventana de 7 días cuenta desde ahí).",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Coincidencia').item.json;\nif (!$json.id) return { json: { ...base, reserved: false } };\nreturn { json: { ...base, id: $json.id, attempts: 0, created_at: $json.created_at, reserved: true } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "d633113e-2956-548e-b021-a7f476453ab1",
+      "name": "Con reserva",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2360,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.reserved }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3d7b0c56-99d7-5f55-898d-dc2422198fcc",
+      "name": "¿Reservado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2600,
+        560
+      ],
+      "notes": "No: duplicado, se acaba."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id::text AS id, c.comment_id, c.media_id, c.igsid, c.username, c.text, c.attempts, c.created_at, to_jsonb(k) AS rule\nFROM ig_comments c\nLEFT JOIN ig_keywords k ON k.id = c.keyword_id\nWHERE c.comment_id = $1::text AND c.status = 'procesando'",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.comment_id] }}"
+        }
+      },
+      "id": "9a9ac07e-6c5c-5eef-b700-ef8bd43cfb8a",
+      "name": "Cargar reintento",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1400,
+        240
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "La fila la dejó en procesando IG 02b. Si no está en ese estado, no devuelve nada y se acaba.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const rule = typeof $json.rule === 'string' ? JSON.parse($json.rule) : $json.rule;\nreturn { json: { ...$json, rule: rule && rule.id ? rule : null } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "01b0ef60-e66c-54a6-b293-fa1671918980",
+      "name": "Con reintento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        240
+      ],
+      "notes": "Si la palabra clave se borró entre medias, rule queda a null y el envío falla con un error claro."
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: $json };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "76a2d959-7e15-5134-beeb-10191a43c356",
+      "name": "Comentario a procesar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2840,
+        400
+      ],
+      "notes": "Punto de unión de comentario nuevo y reintento."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH me AS (\n  SELECT id, igsid, media_id FROM ig_comments WHERE id = $1::uuid AND status = 'procesando'\n), dup AS (\n  UPDATE ig_comments c SET status = 'duplicado_usuario', next_attempt_at = NULL\n  FROM me\n  WHERE c.id = me.id AND me.igsid IS NOT NULL AND EXISTS (\n    SELECT 1 FROM ig_comments o\n    WHERE o.igsid = me.igsid AND o.media_id IS NOT DISTINCT FROM me.media_id\n      AND o.id <> me.id AND o.status IN ('respondido', 'privado_enviado')\n  )\n  RETURNING c.id\n), act AS (\n  INSERT INTO ig_actions (comment_id, action, detail)\n  SELECT id, 'duplicado_usuario', '{}'::jsonb FROM dup\n  RETURNING id\n)\nSELECT (SELECT id::text FROM dup) AS dup_id, EXISTS (SELECT 1 FROM me) AS claimed",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.id] }}"
+        }
+      },
+      "id": "7d3f98a7-0974-59f5-b520-2fa5e69fa7b9",
+      "name": "Comprobar usuario",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3080,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Una respuesta privada por usuario y publicación. Si ya recibió una, esta fila pasa a duplicado_usuario y no se repite.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.claimed && !$json.dup_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b523b3a0-72ac-5cdc-81da-2c0d5b8d997a",
+      "name": "¿Procede?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3320,
+        400
+      ],
+      "notes": "No: duplicado de usuario o fila ya tratada."
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Palabras clave de los comentarios: normalizar, encontrar la regla, rotar la\n// variante de la respuesta pública y montar el mensaje privado (máx. 1000 bytes).\n// Sin I/O: las reglas (filas de ig_keywords) las pasa el flujo.\n\nconst KW_PRIVATE_MAX_BYTES = 1000;\n\n// Minúsculas, sin diacríticos (NFKD: también pasa \"𝐆𝐔𝐈𝐀\" a \"guia\"), sin emojis ni\n// símbolos (todo lo que no sea letra, marca de letra, número o espacio pasa a\n// espacio; las marcas se conservan para no romper el japonés), sin caracteres invisibles y con los espacios colapsados.\nfunction normalizeText(value) {\n  return String(value === undefined || value === null ? '' : value)\n    .normalize('NFKD')\n    .replace(/[̀-ͯ]/g, '')\n    .replace(/[​-‏⁠⁦-⁩﻿­︀-️⃣]/g, '')\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{M}\\p{N}\\s]/gu, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction kwActive(rule) {\n  return rule && rule.active !== false && String(rule.keyword || '').trim() !== '';\n}\n\nfunction kwHasMedia(rule) {\n  return rule.media_id !== undefined && rule.media_id !== null && String(rule.media_id).trim() !== '';\n}\n\n// Devuelve la regla que encaja o null. Palabra completa o frase completa:\n// \"guia\" encaja en \"la guía, porfa\" pero no en \"guiar\" ni en \"guiado\".\n// Empate: la regla de una publicación concreta gana a la global; luego la\n// palabra más larga; luego el orden en que llegaron.\nfunction matchKeyword(text, rules, mediaId) {\n  const haystack = ` ${normalizeText(text)} `;\n  if (haystack.trim() === '' || !Array.isArray(rules)) return null;\n  const media = mediaId === undefined || mediaId === null ? '' : String(mediaId).trim();\n  let best = null;\n  let bestScore = null;\n  rules.forEach((rule, index) => {\n    if (!kwActive(rule)) return;\n    const needle = normalizeText(rule.keyword);\n    if (!needle || !haystack.includes(` ${needle} `)) return;\n    const specific = kwHasMedia(rule);\n    if (specific && String(rule.media_id).trim() !== media) return;\n    const score = [specific ? 1 : 0, needle.length, -index];\n    if (bestScore === null || kwBetter(score, bestScore)) { best = rule; bestScore = score; }\n  });\n  return best;\n}\n\nfunction kwBetter(a, b) {\n  for (let i = 0; i < a.length; i += 1) {\n    if (a[i] !== b[i]) return a[i] > b[i];\n  }\n  return false;\n}\n\n// Variante número \"counter\" (módulo el nº de variantes). Las vacías no cuentan.\nfunction pickVariant(variants, counter) {\n  const list = (Array.isArray(variants) ? variants : []).map((item) => String(item === null || item === undefined ? '' : item).trim()).filter(Boolean);\n  if (!list.length) return '';\n  const number = Math.trunc(Number(counter));\n  const index = Number.isFinite(number) ? ((number % list.length) + list.length) % list.length : 0;\n  return list[index];\n}\n\nfunction kwBytes(text) {\n  let total = 0;\n  for (const char of String(text)) {\n    const code = char.codePointAt(0);\n    total += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n  }\n  return total;\n}\n\n// Recorta a maxBytes bytes UTF-8 sin partir un carácter.\nfunction kwCut(text, maxBytes) {\n  let total = 0;\n  let out = '';\n  for (const char of String(text)) {\n    const code = char.codePointAt(0);\n    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n    if (total + size > maxBytes) break;\n    total += size;\n    out += char;\n  }\n  return out;\n}\n\n// Mensaje privado de la regla: private_message y, si el enlace no aparece ya en\n// él, el enlace al final. Si no cabe en 1000 bytes se recorta el texto, nunca el enlace.\nfunction buildPrivateMessage(rule) {\n  const message = String((rule && rule.private_message) || '').trim();\n  const link = String((rule && rule.link) || '').trim();\n  if (!link) return kwCut(message, KW_PRIVATE_MAX_BYTES).trimEnd();\n  const full = message.includes(link) ? message : `${message}\\n\\n${link}`.trim();\n  if (kwBytes(full) <= KW_PRIVATE_MAX_BYTES) return full;\n  const suffix = `\\n\\n${link}`;\n  const room = KW_PRIVATE_MAX_BYTES - kwBytes(suffix) - kwBytes('…');\n  if (room <= 0) return kwCut(full, KW_PRIVATE_MAX_BYTES).trimEnd();\n  const head = message.split(link).join('').trim();\n  return `${kwCut(head, room).trimEnd()}…${suffix}`;\n}\n\nconst work = $('Comentario a procesar').item.json;\nconst text = work.rule ? buildPrivateMessage(work.rule) : '';\nreturn { json: { ...work, private_text: text } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "5e70aa5a-f233-5e42-83be-903a111cfafb",
+      "name": "Preparar privado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3560,
+        400
+      ],
+      "notes": "Mensaje de la regla + enlace, máx. 1000 bytes UTF-8."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuración').first().json.n8n_url.replace(/\\/$/, '') + '/webhook/ig-graph' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ op: 'private_reply', comment_id: $json.comment_id, text: $json.private_text }) }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "68e2bdee-79fc-5a6a-bee6-b4407d1fa222",
+      "name": "Respuesta privada",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3800,
+        400
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "IG 08 → POST /{ig_account_id}/messages con recipient.comment_id. Sin reintentos automáticos.",
+      "retryOnFail": false,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Todo lo que sabe el agente de la Graph API de Meta, sin llamarla: construir la\n// petición (sin token: lo pone la credencial de n8n), clasificar los errores,\n// responder en DRY_RUN, recortar a 1000 bytes y calcular reintentos y ventanas.\n// Fuente de los códigos: notas de la documentación oficial (errores de Messenger\n// e Instagram Messaging). El único flujo que habla con Meta es «IG 08 - Graph API».\n\nconst GRAPH_DM_MAX_BYTES = 1000;\nconst GRAPH_BACKOFF_MINUTES = [1, 2, 5, 15, 60, 240];\nconst GRAPH_OPS = ['public_reply', 'private_reply', 'send_dm', 'get_profile'];\n\nfunction grPick(args, camel, snake) {\n  if (!args) return '';\n  const value = args[camel] !== undefined ? args[camel] : args[snake];\n  return value === undefined || value === null ? '' : String(value).trim();\n}\n\nfunction grNeed(op, name, value) {\n  if (!value) throw new Error(`graph.${op}: falta ${name}`);\n  return value;\n}\n\nfunction utf8Bytes(text) {\n  let total = 0;\n  for (const char of String(text === undefined || text === null ? '' : text)) {\n    const code = char.codePointAt(0);\n    total += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n  }\n  return total;\n}\n\n// Recorta a maxBytes bytes UTF-8 sin partir un carácter (ñ = 2 bytes, emoji = 4).\n// Tampoco deja colgando un unión de emojis (ZWJ) ni un selector de variante.\nfunction truncateUtf8(text, maxBytes) {\n  const limit = Math.max(0, Math.trunc(Number(maxBytes)) || 0);\n  let total = 0;\n  let out = '';\n  for (const char of String(text === undefined || text === null ? '' : text)) {\n    const code = char.codePointAt(0);\n    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n    if (total + size > limit) {\n      return out.replace(/[‍️]+$/, '');\n    }\n    total += size;\n    out += char;\n  }\n  return out;\n}\n\n// buildRequest('public_reply', { commentId, text }, cfg) -> { method, url, body, path }\n// cfg = el nodo Configuración del flujo 08: graph_base, graph_version, ig_account_id\n// (también se aceptan graphBase, graphVersion, igAccountId). path va sin host: es lo\n// que se guarda en ig_graph_log.\nfunction buildRequest(op, args, cfg) {\n  const config = cfg || {};\n  const base = String(config.graph_base || config.graphBase || 'https://graph.facebook.com').replace(/\\/+$/, '');\n  const version = String(config.graph_version || config.graphVersion || 'v27.0').replace(/^\\/+|\\/+$/g, '');\n  const account = String(config.ig_account_id || config.igAccountId || '').trim();\n  const make = (method, path, body) => ({ method, path: `/${version}/${path}`, url: `${base}/${version}/${path}`, body });\n  const enc = encodeURIComponent;\n  if (op === 'public_reply') {\n    const commentId = grNeed(op, 'commentId', grPick(args, 'commentId', 'comment_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(commentId)}/replies`, { message: text });\n  }\n  if (op === 'private_reply') {\n    const commentId = grNeed(op, 'commentId', grPick(args, 'commentId', 'comment_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(grNeed(op, 'ig_account_id', account))}/messages`, {\n      recipient: { comment_id: commentId },\n      message: { text: truncateUtf8(text, GRAPH_DM_MAX_BYTES) },\n    });\n  }\n  if (op === 'send_dm') {\n    const igsid = grNeed(op, 'igsid', grPick(args, 'igsid', 'recipient_id'));\n    const text = grNeed(op, 'text', grPick(args, 'text', 'message'));\n    return make('POST', `${enc(grNeed(op, 'ig_account_id', account))}/messages`, {\n      recipient: { id: igsid },\n      message: { text: truncateUtf8(text, GRAPH_DM_MAX_BYTES) },\n    });\n  }\n  if (op === 'get_profile') {\n    const igsid = grNeed(op, 'igsid', grPick(args, 'igsid', 'recipient_id'));\n    const fields = grPick(args, 'fields', 'fields') || 'name,username';\n    return make('GET', `${enc(igsid)}?fields=${enc(fields).replace(/%2C/gi, ',')}`, null);\n  }\n  throw new Error(`graph: operación desconocida (${String(op)})`);\n}\n\nfunction grParse(body) {\n  if (typeof body === 'string') {\n    try { return JSON.parse(body); } catch { return { error: { message: body.slice(0, 300) } }; }\n  }\n  return body;\n}\n\n// Tabla de errores: código y subcódigo de Meta -> qué hacer.\n//   retryable = se puede volver a intentar más tarde (cola con backoff)\n//   kind      rate_limit | window_closed | invalid_comment | permission | token |\n//             not_found | blocked | transient | unknown\nfunction classifyError(httpStatus, body) {\n  const parsed = grParse(body);\n  const error = parsed && typeof parsed === 'object' && parsed.error !== undefined ? parsed.error : parsed;\n  const detail = error && typeof error === 'object' ? error : {};\n  const code = Number.isFinite(Number(detail.code)) && detail.code !== null && detail.code !== '' ? Number(detail.code) : null;\n  const subcode = Number.isFinite(Number(detail.error_subcode)) && detail.error_subcode !== null && detail.error_subcode !== '' ? Number(detail.error_subcode) : null;\n  const status = Number(httpStatus) || 0;\n  let message = '';\n  if (typeof error === 'string') message = error;\n  else if (detail.message) message = String(detail.message);\n  message = message.replace(/\\s+/g, ' ').trim().slice(0, 300);\n  const out = (kind, retryable) => ({ ok: false, retryable, kind, code, subcode, message });\n\n  if (code === 4 || code === 17 || code === 32) return out('rate_limit', true);\n  if (code === 613) return subcode === 2018338 ? out('blocked', false) : out('rate_limit', true);\n  if (code === 368) return out('blocked', false);\n  if (code === 10) {\n    return subcode === 2534022 || subcode === 2018278 ? out('window_closed', false) : out('permission', false);\n  }\n  if (code === 100) {\n    if (subcode === 2534025) return out('invalid_comment', false);\n    if (subcode === 33 || subcode === 2534014) return out('not_found', false);\n    if (subcode === 2534037) return out('blocked', false);\n    return out('unknown', false);\n  }\n  if (code === 200) return out('permission', false);\n  if (code === 190 || code === 102) return out('token', false);\n  if (code === 551) return out('blocked', false);\n  if (code === 2 || code === 1) return out('transient', true);\n  // Sin código conocido: manda el estado HTTP.\n  if (code === null || status >= 500) {\n    if (status === 429) return out('rate_limit', true);\n    if (status >= 500 || status === 408 || status === 0) return out('transient', true);\n    if (status === 401) return out('token', false);\n    if (status === 403) return out('permission', false);\n    if (status === 404) return out('not_found', false);\n  }\n  if (detail.is_transient === true) return out('transient', true);\n  return out('unknown', false);\n}\n\nfunction grHash(text, seed) {\n  let hash = seed >>> 0;\n  for (let i = 0; i < text.length; i += 1) {\n    hash ^= text.charCodeAt(i);\n    hash = Math.imul(hash, 16777619) >>> 0;\n  }\n  return hash.toString(16).padStart(8, '0');\n}\n\nfunction grStable(value) {\n  if (Array.isArray(value)) return `[${value.map(grStable).join(',')}]`;\n  if (value && typeof value === 'object') {\n    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${grStable(value[key])}`).join(',')}}`;\n  }\n  return JSON.stringify(value === undefined ? null : value);\n}\n\n// Respuesta falsa del modo DRY_RUN. El id es el mismo para la misma operación y\n// los mismos argumentos (dry_<16 hex>): se puede repetir una prueba y comparar.\nfunction dryRunResponse(op, args) {\n  const source = `${op}|${grStable(args || {})}`;\n  const id = `dry_${grHash(source, 2166136261)}${grHash(source, 84696351)}`;\n  if (op === 'public_reply') return { id, dry_run: true };\n  if (op === 'private_reply' || op === 'send_dm') {\n    return { recipient_id: grPick(args, 'igsid', 'recipient_id') || `dry_user_${grHash(source, 7)}`, message_id: id, dry_run: true };\n  }\n  if (op === 'get_profile') return { id: grPick(args, 'igsid', 'recipient_id') || id, name: 'Usuario de prueba', username: 'usuario_demo', dry_run: true };\n  return { id, dry_run: true };\n}\n\n// attempt = nº del intento que acaba de fallar (1, 2, 3…). 1, 2, 5, 15, 60 y\n// 240 minutos; de ahí en adelante, siempre 240.\nfunction backoffMinutes(attempt) {\n  const number = Math.trunc(Number(attempt));\n  if (!Number.isFinite(number) || number < 1) return GRAPH_BACKOFF_MINUTES[0];\n  return GRAPH_BACKOFF_MINUTES[Math.min(number, GRAPH_BACKOFF_MINUTES.length) - 1];\n}\n\n// Cuándo volver a probar (ISO) tras el intento número \"attempt\".\nfunction nextAttemptAt(attempt, now) {\n  const base = now === undefined || now === null ? Date.now() : new Date(now).getTime();\n  return new Date(base + backoffMinutes(attempt) * 60000).toISOString();\n}\n\n// Días que han pasado desde que se creó el comentario (con decimales).\nfunction windowDays(createdAt, now) {\n  const created = new Date(createdAt).getTime();\n  const current = now === undefined || now === null ? Date.now() : new Date(now).getTime();\n  if (Number.isNaN(created) || Number.isNaN(current)) return Infinity;\n  return (current - created) / 86400000;\n}\n\n// ¿Sigue abierta la ventana de la respuesta privada (7 días por defecto)?\nfunction withinPrivateWindow(createdAt, now, days) {\n  const limit = days === undefined || days === null ? 7 : Number(days);\n  return windowDays(createdAt, now) < limit;\n}\n\nconst work = $('Preparar privado').item.json;\nconst config = $('Configuración').first().json;\nlet result = $json;\nif (result.ok === undefined) {\n  const raw = result.error;\n  const message = String(typeof raw === 'string' ? raw : (raw && (raw.message || raw.description)) || 'sin respuesta').slice(0, 300);\n  result = { ok: false, retryable: true, kind: 'transient', code: null, subcode: null, message: 'IG 08 no respondió: ' + message };\n}\nconst now = new Date().toISOString();\nconst attempts = Number(work.attempts || 0) + 1;\nif (result.ok === true) {\n  return { json: { ...work, sent: true, attempts, private_message_id: String(result.message_id || ''), dry_run: result.dry_run === true } };\n}\nconst failure = {\n  kind: result.kind || 'unknown',\n  code: result.code === undefined ? null : result.code,\n  subcode: result.subcode === undefined ? null : result.subcode,\n  message: String(result.message || '').slice(0, 300),\n  retryable: result.retryable === true,\n};\nlet outcome = 'error';\nlet reason = failure.kind;\nlet next = '';\nif (failure.retryable) {\n  if (attempts >= Number(config.max_attempts)) reason = 'max_intentos';\n  else if (!withinPrivateWindow(work.created_at, now, config.window_days)) reason = 'ventana_7_dias';\n  else { outcome = 'reintento'; next = nextAttemptAt(attempts, now); }\n}\nconst detail = { kind: failure.kind, code: failure.code, subcode: failure.subcode, reason, attempts, message: failure.message };\nreturn { json: { ...work, sent: false, outcome, reason, attempts, next_attempt_at: next, failure, action: outcome === 'error' ? 'error_comentario' : 'reintento_programado', detail: JSON.stringify(detail) } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "564c0478-99a6-52f8-a7b0-0fac39be8271",
+      "name": "Evaluar privada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4040,
+        400
+      ],
+      "notes": "ok → enviada. retryable → reintento con espera (1, 2, 5, 15, 60, 240 min) si queda ventana e intentos; si no, error. Resto → error."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.sent }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "eb3c77ef-f06b-523a-b35b-03a22fcd1233",
+      "name": "¿Privada ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4280,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH bumped AS (\n  UPDATE ig_keywords SET variant_counter = variant_counter + 1\n  WHERE id = $1::bigint\n  RETURNING variant_counter - 1 AS used\n)\nSELECT (SELECT used FROM bumped) AS counter",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.rule.id] }}"
+        }
+      },
+      "id": "3b8ead05-0f38-5828-95f5-348fb2096df0",
+      "name": "Elegir variante",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4520,
+        280
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Contador atómico: dos comentarios a la vez no reciben la misma variante.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Palabras clave de los comentarios: normalizar, encontrar la regla, rotar la\n// variante de la respuesta pública y montar el mensaje privado (máx. 1000 bytes).\n// Sin I/O: las reglas (filas de ig_keywords) las pasa el flujo.\n\nconst KW_PRIVATE_MAX_BYTES = 1000;\n\n// Minúsculas, sin diacríticos (NFKD: también pasa \"𝐆𝐔𝐈𝐀\" a \"guia\"), sin emojis ni\n// símbolos (todo lo que no sea letra, marca de letra, número o espacio pasa a\n// espacio; las marcas se conservan para no romper el japonés), sin caracteres invisibles y con los espacios colapsados.\nfunction normalizeText(value) {\n  return String(value === undefined || value === null ? '' : value)\n    .normalize('NFKD')\n    .replace(/[̀-ͯ]/g, '')\n    .replace(/[​-‏⁠⁦-⁩﻿­︀-️⃣]/g, '')\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{M}\\p{N}\\s]/gu, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction kwActive(rule) {\n  return rule && rule.active !== false && String(rule.keyword || '').trim() !== '';\n}\n\nfunction kwHasMedia(rule) {\n  return rule.media_id !== undefined && rule.media_id !== null && String(rule.media_id).trim() !== '';\n}\n\n// Devuelve la regla que encaja o null. Palabra completa o frase completa:\n// \"guia\" encaja en \"la guía, porfa\" pero no en \"guiar\" ni en \"guiado\".\n// Empate: la regla de una publicación concreta gana a la global; luego la\n// palabra más larga; luego el orden en que llegaron.\nfunction matchKeyword(text, rules, mediaId) {\n  const haystack = ` ${normalizeText(text)} `;\n  if (haystack.trim() === '' || !Array.isArray(rules)) return null;\n  const media = mediaId === undefined || mediaId === null ? '' : String(mediaId).trim();\n  let best = null;\n  let bestScore = null;\n  rules.forEach((rule, index) => {\n    if (!kwActive(rule)) return;\n    const needle = normalizeText(rule.keyword);\n    if (!needle || !haystack.includes(` ${needle} `)) return;\n    const specific = kwHasMedia(rule);\n    if (specific && String(rule.media_id).trim() !== media) return;\n    const score = [specific ? 1 : 0, needle.length, -index];\n    if (bestScore === null || kwBetter(score, bestScore)) { best = rule; bestScore = score; }\n  });\n  return best;\n}\n\nfunction kwBetter(a, b) {\n  for (let i = 0; i < a.length; i += 1) {\n    if (a[i] !== b[i]) return a[i] > b[i];\n  }\n  return false;\n}\n\n// Variante número \"counter\" (módulo el nº de variantes). Las vacías no cuentan.\nfunction pickVariant(variants, counter) {\n  const list = (Array.isArray(variants) ? variants : []).map((item) => String(item === null || item === undefined ? '' : item).trim()).filter(Boolean);\n  if (!list.length) return '';\n  const number = Math.trunc(Number(counter));\n  const index = Number.isFinite(number) ? ((number % list.length) + list.length) % list.length : 0;\n  return list[index];\n}\n\nfunction kwBytes(text) {\n  let total = 0;\n  for (const char of String(text)) {\n    const code = char.codePointAt(0);\n    total += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n  }\n  return total;\n}\n\n// Recorta a maxBytes bytes UTF-8 sin partir un carácter.\nfunction kwCut(text, maxBytes) {\n  let total = 0;\n  let out = '';\n  for (const char of String(text)) {\n    const code = char.codePointAt(0);\n    const size = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;\n    if (total + size > maxBytes) break;\n    total += size;\n    out += char;\n  }\n  return out;\n}\n\n// Mensaje privado de la regla: private_message y, si el enlace no aparece ya en\n// él, el enlace al final. Si no cabe en 1000 bytes se recorta el texto, nunca el enlace.\nfunction buildPrivateMessage(rule) {\n  const message = String((rule && rule.private_message) || '').trim();\n  const link = String((rule && rule.link) || '').trim();\n  if (!link) return kwCut(message, KW_PRIVATE_MAX_BYTES).trimEnd();\n  const full = message.includes(link) ? message : `${message}\\n\\n${link}`.trim();\n  if (kwBytes(full) <= KW_PRIVATE_MAX_BYTES) return full;\n  const suffix = `\\n\\n${link}`;\n  const room = KW_PRIVATE_MAX_BYTES - kwBytes(suffix) - kwBytes('…');\n  if (room <= 0) return kwCut(full, KW_PRIVATE_MAX_BYTES).trimEnd();\n  const head = message.split(link).join('').trim();\n  return `${kwCut(head, room).trimEnd()}…${suffix}`;\n}\n\nconst work = $('Evaluar privada').item.json;\nreturn { json: { ...work, public_text: pickVariant(work.rule.public_replies, $json.counter) } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "92a2963c-05d0-59d0-8912-b4ca0be7754c",
+      "name": "Preparar pública",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4760,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuración').first().json.n8n_url.replace(/\\/$/, '') + '/webhook/ig-graph' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ op: 'public_reply', comment_id: $json.comment_id, text: $json.public_text }) }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "038c8041-9419-54d3-a3f8-c3a50b1e55f9",
+      "name": "Respuesta pública",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5000,
+        280
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "IG 08 → POST /{comment_id}/replies. Si falla no se deshace la privada.",
+      "retryOnFail": false,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const work = $('Preparar pública').item.json;\nlet result = $json;\nif (result.ok === undefined) {\n  const raw = result.error;\n  result = { ok: false, kind: 'transient', code: null, subcode: null, message: 'IG 08 no respondió: ' + String(typeof raw === 'string' ? raw : (raw && raw.message) || 'sin respuesta').slice(0, 200) };\n}\nconst publicOk = result.ok === true;\nconst note = publicOk ? null : { public_reply: { kind: result.kind || 'unknown', code: result.code === undefined ? null : result.code, subcode: result.subcode === undefined ? null : result.subcode, message: String(result.message || '').slice(0, 300) } };\nreturn { json: {\n  id: work.id,\n  status: publicOk ? 'respondido' : 'privado_enviado',\n  public_reply_id: publicOk ? String(result.id || '') : '',\n  private_message_id: work.private_message_id,\n  attempts: work.attempts,\n  last_error: JSON.stringify(note),\n  keyword: String(work.rule.keyword || ''),\n  action: publicOk ? 'respondido' : 'privado_enviado_sin_publica',\n  detail: JSON.stringify({ dry_run: work.dry_run === true, keyword_id: work.rule.id, public_ok: publicOk, private_message_id: work.private_message_id }),\n} };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "17acb13f-f89d-52db-ad7b-4dc9732da33c",
+      "name": "Evaluar pública",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5240,
+        280
+      ],
+      "notes": "Pública ok → respondido. Pública fallida → privado_enviado y el fallo queda en last_error y en ig_actions."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH upd AS (\n  UPDATE ig_comments\n  SET status = CASE WHEN EXISTS (\n        SELECT 1 FROM ig_comments o\n        WHERE o.igsid = ig_comments.igsid AND o.media_id IS NOT DISTINCT FROM ig_comments.media_id\n          AND o.id <> ig_comments.id AND o.status IN ('respondido', 'privado_enviado')\n      ) THEN 'duplicado_usuario' ELSE $2::text END,\n      public_reply_id = NULLIF($3::text, ''),\n      private_message_id = NULLIF($4::text, ''),\n      attempts = $5::integer,\n      next_attempt_at = NULL,\n      last_error = NULLIF($6::text, 'null')::jsonb\n  WHERE id = $1::uuid AND status = 'procesando'\n  RETURNING id, igsid, username, media_id, comment_id\n), contact AS (\n  INSERT INTO ig_contacts (igsid, username, keyword, media_id, comment_id)\n  SELECT igsid, username, $7::text, media_id, comment_id FROM upd WHERE igsid IS NOT NULL\n  ON CONFLICT (igsid) DO UPDATE\n    SET username = COALESCE(EXCLUDED.username, ig_contacts.username),\n        keyword = EXCLUDED.keyword, media_id = EXCLUDED.media_id,\n        comment_id = EXCLUDED.comment_id, last_seen = now()\n  RETURNING igsid\n), act AS (\n  INSERT INTO ig_actions (comment_id, action, detail)\n  SELECT id, $8::text, $9::jsonb FROM upd\n  RETURNING id\n)\nSELECT (SELECT id::text FROM upd) AS id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.id, $json.status, $json.public_reply_id, $json.private_message_id, $json.attempts, $json.last_error, $json.keyword, $json.action, $json.detail] }}"
+        }
+      },
+      "id": "bcb1b897-09ce-5283-9dc2-8780df84d1b0",
+      "name": "Marcar enviado",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        5480,
+        280
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Un solo UPDATE: estado final + contacto (upsert en ig_contacts) + ig_actions. Si en medio se coló otra privada al mismo usuario, queda duplicado_usuario en vez de romper el índice único.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH prev AS (\n  SELECT EXISTS (\n    SELECT 1 FROM ig_actions\n    WHERE action = 'error_comentario' AND detail->>'kind' = $8::text\n      AND created_at > now() - interval '10 minutes'\n  ) AS seen\n), upd AS (\n  UPDATE ig_comments\n  SET status = $2::text, attempts = $3::integer,\n      next_attempt_at = NULLIF($4::text, '')::timestamptz, last_error = $5::jsonb\n  WHERE id = $1::uuid AND status = 'procesando'\n  RETURNING id\n), act AS (\n  INSERT INTO ig_actions (comment_id, action, detail)\n  SELECT id, $6::text, $7::jsonb FROM upd\n  RETURNING id\n)\nSELECT (SELECT id::text FROM upd) AS id, NOT (SELECT seen FROM prev) AS first_of_kind",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.id, $json.outcome, $json.attempts, $json.next_attempt_at, JSON.stringify($json.failure), $json.action, $json.detail, $json.failure.kind] }}"
+        }
+      },
+      "id": "275b7b4d-0682-5cd0-8bf4-29cfa52e530a",
+      "name": "Marcar fallo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        4520,
+        540
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "reintento (con next_attempt_at) o error. first_of_kind: ¿es el primer error de ese tipo en 10 minutos? (para no inundar Telegram).",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Textos que salen a Telegram. Todo lo que viene de Instagram (usuario, comentario,\n// mensaje, borrador) se escapa: el mensaje va con parse_mode HTML.\n// Forma de todos los avisos (la misma que en el agente de correo): emoji y título\n// en negrita, campos \"Etiqueta: valor\" uno por línea, bloques separados por una\n// línea en blanco, el texto largo en una cita.\n\n// Telegram corta en 4096. Los avisos se quedan en 3600 para que quepa la línea\n// de resultado que se añade al pulsar un botón (withResult).\nconst TELEGRAM_MAX = 4096;\nconst MESSAGE_MAX = 3600;\n\nfunction escapeHtml(value) {\n  return String(value ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\n// Recorta sin dejar medio emoji (un surrogate suelto lo rechaza Telegram).\nfunction cut(value, max) {\n  const text = String(value ?? '');\n  if (text.length <= max) return text;\n  let end = Math.max(0, max);\n  const code = text.charCodeAt(end - 1);\n  if (code >= 0xD800 && code <= 0xDBFF) end -= 1;\n  return text.slice(0, end);\n}\n\nfunction quote(text) {\n  return `<blockquote>${text}</blockquote>`;\n}\n\n// parts: líneas ya escapadas y, como mucho, un bloque largo\n// { raw, limit, render(textoEscapado, recortado) }. Si no cabe, se recorta solo\n// ese bloque. Cabecera y pie salen siempre enteros.\nfunction fit(parts, max = MESSAGE_MAX) {\n  const long = parts.find((part) => typeof part !== 'string');\n  const render = (raw, trimmed) => parts\n    .map((part) => (typeof part === 'string' ? part : part.render(escapeHtml(raw), trimmed)))\n    .join('\\n');\n  if (!long) return render('', false);\n  let raw = String(long.raw ?? '');\n  let trimmed = false;\n  if (long.limit && raw.length > long.limit) {\n    raw = cut(raw, long.limit).trimEnd() + ' […]';\n    trimmed = true;\n  }\n  const full = render(raw, trimmed);\n  if (full.length <= max) return full;\n  let keep = raw.length - (full.length - max) - 20;\n  while (keep > 0) {\n    const out = render(cut(raw, keep).trimEnd() + ' […]', true);\n    if (out.length <= max) return out;\n    keep -= Math.max(10, out.length - max);\n  }\n  return render('[…]', true);\n}\n\n// Hora de Madrid sin depender de ICU: UTC+1, y UTC+2 desde el último domingo\n// de marzo hasta el último de octubre (a la 01:00 UTC, regla de la UE).\nfunction lastSundayUtc(year, month) {\n  const last = new Date(Date.UTC(year, month + 1, 0));\n  return last.getUTCDate() - last.getUTCDay();\n}\n\nfunction madridLocal(date) {\n  const when = new Date(date === undefined ? Date.now() : date);\n  const year = when.getUTCFullYear();\n  const summerStart = Date.UTC(year, 2, lastSundayUtc(year, 2), 1);\n  const summerEnd = Date.UTC(year, 9, lastSundayUtc(year, 9), 1);\n  const offset = when.getTime() >= summerStart && when.getTime() < summerEnd ? 2 : 1;\n  return new Date(when.getTime() + offset * 3600000);\n}\n\nfunction pad2(value) {\n  return String(value).padStart(2, '0');\n}\n\nfunction madridTime(date) {\n  const local = madridLocal(date);\n  return pad2(local.getUTCHours()) + ':' + pad2(local.getUTCMinutes());\n}\n\n// \"10/11 18:30\", hora de Madrid. Para las ventanas, que cruzan de día.\nfunction madridStamp(date) {\n  const local = madridLocal(date);\n  return `${pad2(local.getUTCDate())}/${pad2(local.getUTCMonth() + 1)} ${madridTime(date)}`;\n}\n\nfunction validDate(value) {\n  if (value === undefined || value === null || value === '') return null;\n  const date = new Date(value);\n  return Number.isNaN(date.getTime()) ? null : date;\n}\n\n// \"@usuario_demo\" si lo conocemos; si no, el IGSID (en comentarios y mensajes\n// sin nombre de usuario). Nunca queda vacío.\nfunction userLine(row) {\n  const username = String(row.username || '').trim().replace(/^@/, '');\n  const igsid = String(row.igsid || '').trim();\n  if (username) return `Usuario: @${escapeHtml(cut(username, 80))}${igsid ? ` (<code>${escapeHtml(cut(igsid, 40))}</code>)` : ''}`;\n  return `Usuario: ${igsid ? `<code>${escapeHtml(cut(igsid, 40))}</code>` : '(desconocido)'}`;\n}\n\n// Lo que escribió el usuario. En ig_messages se guarda en text_normalized.\nfunction userText(row) {\n  return String(row.text ?? row.text_normalized ?? '').trim();\n}\n\nconst CATEGORY_LABELS = {\n  consulta_frecuente: 'consulta frecuente',\n  revision: 'revisión',\n  fuera_de_tema: 'fuera de tema',\n  sensible: 'tema sensible',\n};\n\nfunction categoryLabel(category) {\n  return CATEGORY_LABELS[category] || String(category || 'sin categoría').replace(/_/g, ' ');\n}\n\nfunction formatSources(sources) {\n  const list = Array.isArray(sources) ? sources.slice(0, 3) : [];\n  if (!list.length) return 'Sin fragmentos en la base de conocimiento.';\n  return list.map((source) => {\n    const title = cut(String(source.title || 'Documento'), 120);\n    const when = source.updated_at ? ` (${String(source.updated_at).slice(0, 10)})` : '';\n    const url = cut(String(source.canonical_url || source.url || ''), 200);\n    return `• ${title}${when}${url ? `\\n  ${url}` : ''}`;\n  }).join('\\n');\n}\n\nfunction loopHoldText(row) {\n  const minutes = Number(row && row.loop_minutes);\n  const span = Number.isFinite(minutes) && minutes > 0 ? `hace menos de ${minutes} min` : 'hace poco';\n  return `Retenido por el freno anti-bucles: a este usuario ya se le contestó automáticamente ${span}. Revísalo antes de enviar.`;\n}\nconst SENSITIVE_TEXT = 'Tema sensible: habla de precio, plazo, devolución o datos personales. Hace falta una persona.';\nconst WINDOW_RULE_TEXT = 'Instagram solo deja contestar dentro de las 24 h siguientes al último mensaje del usuario.';\n\n// El título dice por qué está bloqueado. Mandan los motivos de decide.js\n// (ig_messages.reasons); si no llegan, el principio del razonamiento, que\n// decide.js escribe con estas mismas frases. Mismo orden de prioridad que decide.js.\nconst BLOCKED_TITLES = [\n  ['inyeccion', /^El mensaje intenta dar instrucciones/, 'Bloqueado: intenta dar órdenes'],\n  ['promesa', /^El borrador prometía/, 'Bloqueado: el borrador prometía dinero o plazos'],\n  ['fuga_prompt', /^El borrador repetía instrucciones internas/, 'Bloqueado: el borrador repetía instrucciones internas'],\n  ['enlace_ajeno', /^El borrador traía un enlace/, 'Bloqueado: el borrador traía un enlace o un contacto ajeno'],\n  ['fuente_sospechosa', /^Una fuente de la base de conocimiento/, 'Bloqueado: fuente sospechosa en la base de conocimiento'],\n];\n\nfunction reasonList(value) {\n  let list = value;\n  if (typeof list === 'string') {\n    try { list = JSON.parse(list); } catch { list = []; }\n  }\n  return Array.isArray(list) ? list.map((item) => String(item)) : [];\n}\n\nfunction blockedTitle(reasoning, reasons) {\n  const codes = reasonList(reasons);\n  const byCode = BLOCKED_TITLES.find(([code]) => codes.includes(code));\n  if (byCode) return byCode[2];\n  const text = String(reasoning || '').trim();\n  const byText = BLOCKED_TITLES.find(([, regex]) => regex.test(text));\n  return byText ? byText[2] : 'Bloqueado: revísalo antes de contestar';\n}\n\n// Motivos por los que no salió solo. labels: el mapa REASONS de decide.js\n// (código → frase). Sin mapa, salen los códigos.\nfunction reasonsBlock(reasons, labels) {\n  const codes = reasonList(reasons);\n  if (!codes.length) return [];\n  const map = labels && typeof labels === 'object' ? labels : {};\n  return ['', '<b>Motivos</b>', ...codes.slice(0, 8).map((code) => `• ${escapeHtml(cut(String(map[code] || code), 200))}`)];\n}\n\n// Línea de la ventana de 24 h. Con \"now\" avisa si ya se cerró.\nfunction windowLine(row, now) {\n  const expires = validDate(row.window_expires_at);\n  if (!expires) return '';\n  if (now !== undefined && now !== null) {\n    const current = validDate(now);\n    if (current && expires.getTime() <= current.getTime()) return `⌛ La ventana de 24 h se cerró el ${madridStamp(expires)}: ya no se podrá enviar.`;\n  }\n  return `⏳ Ventana de 24 h: se cierra el ${madridStamp(expires)} (hora de Madrid).`;\n}\n\n// Fila de ig_messages -> campos de approvalMessage. La usan el flujo 05 al mandar\n// el aviso y el 04/06 al rehacerlo para quitarle los botones: sale igual.\nfunction approvalFromRow(row) {\n  let sources = Array.isArray(row.sources) ? row.sources : row.rag_sources;\n  if (typeof sources === 'string') {\n    try { sources = JSON.parse(sources); } catch { sources = []; }\n  }\n  return {\n    username: row.username,\n    igsid: row.igsid,\n    text: row.text,\n    text_normalized: row.text_normalized,\n    category: row.category,\n    confidence: row.confidence,\n    draft_reply: row.draft_reply,\n    reasoning: row.reasoning,\n    window_expires_at: row.window_expires_at,\n    loop_minutes: row.loop_minutes,\n    reasons: reasonList(row.reasons),\n    reason_labels: row.reason_labels,\n    sources: Array.isArray(sources) ? sources : [],\n    injection: row.injection === true || row.injection_flag === true,\n    sensitive: row.sensitive === true || row.sensitive_flag === true,\n    loop_hold: row.loop_hold === true,\n  };\n}\n\n// Acepta la fila de ig_messages tal cual (rag_sources, injection_flag…) o ya mapeada.\nfunction approvalMessage(input, now) {\n  const row = approvalFromRow(input || {});\n  const blocked = Boolean(row.injection);\n  const parts = blocked\n    ? [`🛑 <b>${blockedTitle(row.reasoning, row.reasons)}</b>`, userLine(row)]\n    : [\n      '📝 <b>Borrador para aprobar (Instagram)</b>',\n      userLine(row),\n      `Categoría: ${escapeHtml(categoryLabel(row.category))} · confianza ${Math.round(Number(row.confidence || 0) * 100)} %`,\n    ];\n  const window = windowLine(row, now);\n  if (window) parts.push(window);\n  const warnings = [];\n  // El flujo 04 no lo mandó solo: ese usuario ya recibió una respuesta automática hace poco.\n  if (row.loop_hold) warnings.push('🔁 ' + loopHoldText(row));\n  if (row.sensitive) warnings.push('⚠️ ' + SENSITIVE_TEXT);\n  if (warnings.length) parts.push('', ...warnings);\n  if (row.reasoning) parts.push('', `Por qué: ${escapeHtml(cut(String(row.reasoning).trim(), 300))}`);\n  parts.push(...reasonsBlock(row.reasons, row.reason_labels));\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 800));\n  if (!blocked) {\n    const draft = String(row.draft_reply || '').trim();\n    parts.push('', '<b>Borrador</b>');\n    parts.push(draft\n      ? { raw: draft, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortado para Telegram. El mensaje sale entero.</i>' : '') }\n      : '(vacío: escribe tú la respuesta con Editar)');\n  }\n  parts.push('', '<b>Fuentes</b>', escapeHtml(formatSources(row.sources)));\n  // Bloqueado = sin borrador. Lo que vea el usuario lo escribe una persona.\n  if (blocked) parts.push('', 'Sin borrador y sin botón Aprobar: escribe tú la respuesta con Editar, o Rechazar.');\n  return fit(parts);\n}\n\n// fit() admite un solo bloque largo. El texto del usuario va con este, recortado\n// a mano; el borrador o la respuesta es el bloque largo de cada aviso.\nfunction shortBlock(text, limit) {\n  const clean = String(text || '').trim();\n  return clean ? quote(escapeHtml(cut(clean, limit)) + (clean.length > limit ? ' […]' : '')) : '(sin texto)';\n}\n\n// Respuesta enviada. options.mode: 'auto' (el agente solo) o 'manual' (tú pulsaste\n// Aprobar o Editar). options.dryRun: no salió nada a Instagram.\nfunction sentNotice(row, options) {\n  const opts = options || {};\n  const auto = opts.mode === 'auto';\n  const parts = [\n    auto ? '🤖 <b>Respondido solo (Instagram)</b>' : '✅ <b>Respuesta enviada (Instagram)</b>',\n    userLine(row),\n    '',\n    '<b>Mensaje del usuario</b>',\n    shortBlock(userText(row), 600),\n    '',\n    auto ? '<b>Respuesta</b>' : '<b>Respuesta enviada</b>',\n  ];\n  const reply = String(row.final_reply || row.draft_reply || '').trim();\n  parts.push(reply\n    ? { raw: reply, limit: 1000, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortada para Telegram. Salió entera.</i>' : '') }\n    : '(sin texto)');\n  if (opts.dryRun) parts.push('', '🧪 Simulado (DRY_RUN): no se envió nada a Instagram.');\n  return fit(parts);\n}\n\n// No se envió porque pasaron 24 h desde el mensaje del usuario.\nfunction windowClosedNotice(row) {\n  const parts = ['⌛ <b>No se envió: la ventana de 24 h ya se cerró</b>', userLine(row)];\n  const expires = validDate(row.window_expires_at);\n  if (expires) parts.push(`La ventana se cerró el ${madridStamp(expires)} (hora de Madrid).`);\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 500));\n  const draft = String(row.final_reply || row.draft_reply || '').trim();\n  if (draft) parts.push('', '<b>Respuesta que no salió</b>', { raw: draft, limit: 800, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortada para Telegram.</i>' : '') });\n  parts.push('', WINDOW_RULE_TEXT + ' Si todavía merece la pena, contéstale tú desde la app de Instagram.');\n  return fit(parts);\n}\n\n// Retenido por el freno anti-bucles: pasa a aprobación en vez de salir solo.\nfunction heldNotice(row) {\n  const parts = ['🔁 <b>Retenido por el freno anti-bucles</b>', userLine(row), '', loopHoldText(row)];\n  const window = windowLine(row);\n  if (window) parts.push(window);\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 500));\n  return fit(parts);\n}\n\nconst COMMENT_ERROR_HINTS = {\n  rate_limit: 'Es un límite de Meta. Se reintenta solo, cada vez más espaciado, mientras el comentario tenga menos de 7 días.',\n  window_closed: 'La ventana para contestar se cerró. No se reintenta.',\n  invalid_comment: 'Meta no acepta ese comentario para respuesta privada (ya tenía una, pasaron 7 días o no es válido). No se reintenta.',\n  permission: 'Falta un permiso o la cuenta tiene desactivado el acceso a mensajes. Revisa la app de Meta.',\n  token: 'El token de Meta ya no vale. Genera uno nuevo y actualiza la credencial «Instagram Token».',\n  not_found: 'Meta no encuentra ese ID o el token no lo ve. Revisa el ID de la cuenta y los permisos.',\n  blocked: 'Esa persona no está disponible o te ha bloqueado. No se reintenta.',\n  transient: 'Error temporal de Meta. Se reintenta solo.',\n};\n\n// Un comentario que no se pudo contestar. error: lo que devuelve classifyError\n// (o un texto suelto). row: { comment_id, username, igsid, text, keyword, attempts, id }.\nfunction commentErrorNotice(row, error) {\n  const detail = error && typeof error === 'object' ? error : { message: error };\n  const parts = ['⚠️ <b>Error con un comentario</b>', userLine(row)];\n  if (row.keyword) parts.push(`Palabra clave: ${escapeHtml(cut(String(row.keyword), 80))}`);\n  if (row.comment_id) parts.push(`Comentario: <code>${escapeHtml(cut(String(row.comment_id), 60))}</code>`);\n  if (row.attempts) parts.push(`Intentos: ${escapeHtml(String(row.attempts))}`);\n  parts.push('', shortBlock(row.text, 300));\n  const codes = detail.code ? ` (código ${escapeHtml(String(detail.code))}${detail.subcode ? `/${escapeHtml(String(detail.subcode))}` : ''})` : '';\n  parts.push('', `Error${codes}: <code>${escapeHtml(cut(String(detail.message || 'sin detalle').replace(/\\s+/g, ' ').trim(), 400))}</code>`);\n  const hint = COMMENT_ERROR_HINTS[detail.kind];\n  if (hint) parts.push('', `<b>Qué hacer:</b> ${escapeHtml(hint)}`);\n  return fit(parts);\n}\n\n// Aviso genérico de fallo. Corto y sin el texto del usuario.\nfunction failureMessage(what, row, error) {\n  const parts = [`⚠️ <b>Fallo: ${escapeHtml(cut(String(what), 200))}</b>`];\n  if (row && (row.username || row.igsid)) parts.push(userLine(row));\n  if (row && row.id) parts.push(`Fila: <code>${escapeHtml(row.id)}</code>`);\n  parts.push(`Error: <code>${escapeHtml(cut(String(error || 'sin detalle'), 500))}</code>`);\n  if (row && row.hint) parts.push('', `<b>Qué hacer:</b> ${escapeHtml(cut(String(row.hint), 1200))}`);\n  return fit(parts);\n}\n\nconst SEND_FAILURE_HINT = 'Queda en error_envio. Reintentar lo manda otra vez (tu texto si lo editaste), siempre que la ventana de 24 h siga abierta. Si nadie pulsa, vence como una aprobación.';\n\nfunction sendFailureMessage(row, error) {\n  return failureMessage('no se pudo enviar el mensaje', { ...row, hint: SEND_FAILURE_HINT }, error);\n}\n\n// Resumen diario. Secciones; las líneas a 0 no salen, salvo las importantes.\n// counts (los rellena la consulta del flujo 07; ausentes = 0):\n//   keyword_comments   comentarios con palabra clave\n//   private_sent       respuestas privadas enviadas\n//   auto_replied       mensajes contestados solos\n//   approved           mensajes aprobados por ti (Aprobar o Editar)\n//   rejected           rechazados por ti\n//   expired_approvals  aprobaciones vencidas\n//   expired_windows    ventanas de 24 h vencidas (no se envió)\n//   blocked_injection  bloqueados por inyección\n//   blocked_sensitive  retenidos por tema sensible\n//   blocked_loop       retenidos por el freno anti-bucles\n//   errors             con error\n//   waiting            esperando aprobación\n//   stuck              atascados más de 1 h\n//   purged             borrados por retención\nfunction summaryMessage(counts) {\n  const data = counts || {};\n  const n = (key) => (Number.isFinite(Number(data[key])) ? Math.max(0, Math.trunc(Number(data[key]))) : 0);\n  const section = (title, rows) => {\n    const shown = rows.filter(([, value, always]) => always || value > 0);\n    return shown.length ? ['', `<b>${title}</b>`, ...shown.map(([label, value]) => `${label}: ${value}`)] : [];\n  };\n  const expired = n('expired_approvals') + n('expired_windows');\n  const blocked = n('blocked_injection') + n('blocked_sensitive') + n('blocked_loop');\n  const blockedDetail = [\n    n('blocked_injection') ? `${n('blocked_injection')} inyección` : '',\n    n('blocked_sensitive') ? `${n('blocked_sensitive')} sensibles` : '',\n    n('blocked_loop') ? `${n('blocked_loop')} bucle` : '',\n  ].filter(Boolean).join(', ');\n  const expiredDetail = [\n    n('expired_approvals') ? `${n('expired_approvals')} aprobaciones` : '',\n    n('expired_windows') ? `${n('expired_windows')} ventanas de 24 h` : '',\n  ].filter(Boolean).join(', ');\n  const lines = [\n    '📊 <b>Resumen de ayer · Instagram</b>',\n    ...section('Comentarios', [\n      ['Con palabra clave', n('keyword_comments')],\n      ['Privados enviados', n('private_sent')],\n    ]),\n    ...section('Mensajes directos', [\n      ['Contestados solos', n('auto_replied')],\n      ['Aprobados por ti', n('approved')],\n      ['Rechazados por ti', n('rejected')],\n    ]),\n    ...section('Pendiente de ti', [\n      ['Esperando aprobación', n('waiting'), true],\n    ]),\n    ...section('Sin enviar', [\n      [`Vencidos${expiredDetail ? ` (${expiredDetail})` : ''}`, expired],\n      [`Bloqueados${blockedDetail ? ` (${blockedDetail})` : ''}`, blocked],\n    ]),\n    ...section('Problemas', [\n      ['Con error (míralos)', n('errors'), true],\n      ['Atascados más de 1 h', n('stuck')],\n    ]),\n  ];\n  if (n('purged')) lines.push('', `Borrados por retención: ${n('purged')}`);\n  const plural = (value, one, many) => `${value} ${value === 1 ? one : many}`;\n  const todo = [\n    n('waiting') ? `${n('waiting')} por aprobar` : '',\n    n('errors') ? `${n('errors')} con error` : '',\n    n('stuck') ? plural(n('stuck'), 'atascado', 'atascados') : '',\n    expired ? plural(expired, 'vencido', 'vencidos') : '',\n  ].filter(Boolean);\n  lines.push('', todo.length ? `👉 Te toca: ${todo.join(', ')}.` : '✅ Nada pendiente de ti.');\n  return lines.join('\\n');\n}\n\n// Línea que se añade al mensaje con botones cuando se decide. telegram.js dice\n// qué pasó (la clave); aquí está cómo se lee.\nconst RESULTS = {\n  enviando: '⏳ Aprobado. Enviando…',\n  enviado: '✅ Aprobado y enviado',\n  enviado_editado: '✅ Enviado con tu texto',\n  rechazado: '❌ Rechazado',\n  editando: '✏️ Editando: escribe en este chat el texto que se enviará',\n  fallo_envio: '⚠️ Falló el envío',\n  fallo_04: '⚠️ Falló el envío: el flujo IG 04 no recibió la petición',\n  ya_respondido: '✅ Ya estaba respondido. No se envía otra vez.',\n  ya_rechazado: '❌ Ya estaba rechazado. No se envía nada.',\n  vencido: '⌛ Venció el plazo de aprobación. No se envía nada.',\n  vencido_ventana: '⌛ No se envió: la ventana de 24 h ya se cerró',\n  retenido: '🔁 Retenido por el freno anti-bucles y aún sin pasar a aprobación. Este botón no envía nada.',\n  sin_fila: 'ℹ️ Este mensaje ya no corresponde a ningún mensaje de Instagram.',\n  otro: 'ℹ️ Este botón ya no hace nada.',\n};\nconst RESULT_TAILS = {\n  fallo_envio: 'Tienes Reintentar en el aviso de abajo.',\n  fallo_04: 'Pulsa Aprobar otra vez cuando esté.',\n};\n\nfunction resultLine(kind, options = {}) {\n  let line = RESULTS[kind] || RESULTS.otro;\n  if (options.detail) line += ': ' + escapeHtml(cut(String(options.detail).replace(/\\s+/g, ' ').trim(), 200));\n  if (options.when) line += ' · ' + options.when;\n  const tail = options.tail || RESULT_TAILS[kind];\n  return tail ? `${line}. ${tail}` : line;\n}\n\nfunction withResult(base, line) {\n  return cut(`${base}\\n\\n${line}`, TELEGRAM_MAX);\n}\n\n// Un botón de un mensaje que ya no tiene fila: se rehace con el texto plano que\n// trae el propio botón (Telegram lo manda sin formato).\nfunction plainMessage(text) {\n  return escapeHtml(cut(String(text || '').trim(), 3000));\n}\n\n// Ayuda que manda IG 06 al pulsar Editar. Con una sola edición abierta vale\n// cualquier texto del chat; con varias, hay que responder citando este mensaje.\nfunction editHelpMessage(row) {\n  const parts = ['✏️ <b>Escribe la respuesta</b>', userLine(row || {})];\n  const window = windowLine(row || {});\n  if (window) parts.push(window);\n  parts.push(\n    '',\n    'Manda en este chat el texto exacto que recibirá por DM (máx. 1000 bytes: cada tilde o ñ cuenta 2 y cada emoji 4).',\n    'Si tienes varias ediciones abiertas, responde citando este mensaje.',\n  );\n  return fit(parts);\n}\n\nconst f = $('Evaluar privada').item.json;\nconst config = $('Configuración').first().json;\nconst chat = String(config.telegram_chat_id || '').trim();\nconst notify = f.outcome === 'error' && $json.first_of_kind === true && Boolean($json.id) && chat !== '' && chat !== 'cambia-esto';\nconst closed = f.reason === 'ventana_7_dias';\nconst exhausted = f.reason === 'max_intentos';\nconst notice = {\n  ...f.failure,\n  kind: closed ? 'window_closed' : (exhausted ? 'transient' : f.failure.kind),\n  message: (closed ? 'Pasaron los 7 días de la ventana. ' : (exhausted ? 'Agotados los intentos (' + f.attempts + '). ' : '')) + f.failure.message,\n};\nconst text = notify ? commentErrorNotice({ id: f.id, comment_id: f.comment_id, username: f.username, igsid: f.igsid, text: f.text, keyword: f.rule && f.rule.keyword, attempts: f.attempts }, notice) : '';\nreturn { json: { notify, chat_id: chat, text } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "a04a99ee-25d9-5341-a9d1-48aeea7cd37d",
+      "name": "Texto aviso",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4760,
+        540
+      ],
+      "notes": "Solo avisa de errores definitivos y solo el primero de cada tipo en 10 minutos."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.notify }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ab328b3b-05bf-59b2-89ec-ab308a526f12",
+      "name": "¿Avisar error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5000,
+        540
+      ],
+      "notes": "Solo si telegram_chat_id ya no es «cambia-esto»."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "none",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false,
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "52961033-9379-5034-ae69-fa74c9fb148b",
+      "name": "Avisar error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        5240,
+        540
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "notes": "Bot de Instagram (credencial Telegram Instagram).",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook comentario": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuración": {
+      "main": [
+        [
+          {
+            "node": "Leer petición",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer petición": {
+      "main": [
+        [
+          {
+            "node": "¿Válida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Válida?": {
+      "main": [
+        [
+          {
+            "node": "¿Reintento?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Reintento?": {
+      "main": [
+        [
+          {
+            "node": "Cargar reintento",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reglas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reglas": {
+      "main": [
+        [
+          {
+            "node": "Coincidencia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coincidencia": {
+      "main": [
+        [
+          {
+            "node": "¿Coincide?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Coincide?": {
+      "main": [
+        [
+          {
+            "node": "Reservar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reservar": {
+      "main": [
+        [
+          {
+            "node": "Con reserva",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Con reserva": {
+      "main": [
+        [
+          {
+            "node": "¿Reservado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Reservado?": {
+      "main": [
+        [
+          {
+            "node": "Comentario a procesar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cargar reintento": {
+      "main": [
+        [
+          {
+            "node": "Con reintento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Con reintento": {
+      "main": [
+        [
+          {
+            "node": "Comentario a procesar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comentario a procesar": {
+      "main": [
+        [
+          {
+            "node": "Comprobar usuario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comprobar usuario": {
+      "main": [
+        [
+          {
+            "node": "¿Procede?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Procede?": {
+      "main": [
+        [
+          {
+            "node": "Preparar privado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar privado": {
+      "main": [
+        [
+          {
+            "node": "Respuesta privada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respuesta privada": {
+      "main": [
+        [
+          {
+            "node": "Evaluar privada",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Evaluar privada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluar privada": {
+      "main": [
+        [
+          {
+            "node": "¿Privada ok?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Privada ok?": {
+      "main": [
+        [
+          {
+            "node": "Elegir variante",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Marcar fallo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Elegir variante": {
+      "main": [
+        [
+          {
+            "node": "Preparar pública",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar pública": {
+      "main": [
+        [
+          {
+            "node": "Respuesta pública",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respuesta pública": {
+      "main": [
+        [
+          {
+            "node": "Evaluar pública",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Evaluar pública",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluar pública": {
+      "main": [
+        [
+          {
+            "node": "Marcar enviado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar fallo": {
+      "main": [
+        [
+          {
+            "node": "Texto aviso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texto aviso": {
+      "main": [
+        [
+          {
+            "node": "¿Avisar error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Avisar error?": {
+      "main": [
+        [
+          {
+            "node": "Avisar error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

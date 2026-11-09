@@ -1,0 +1,923 @@
+{
+  "name": "IG 01 - Webhook",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "### IG 01 Webhook\n\nÚnico punto público: `/webhook/instagram`. Meta no puede mandar cabeceras propias, así que la seguridad es la firma.\n\n**GET**: verificación (hub.challenge) con el verify token de `Configuración`.\n**POST**: el JS saca los bytes crudos, el runner de **Python** calcula el HMAC con `IG_APP_SECRET` (variable de task-runners, no está en n8n) y, si no cuadra, 403 y no se hace nada más.\n\nSi cuadra: **200 antes de procesar**, se normaliza el lote, se deduplica en `ig_events` y cada evento nuevo va por HTTP interno a IG 02 (comentarios) o IG 03 (mensajes). Sin IA.\n\nPrivacidad: este flujo no guarda las ejecuciones correctas (el cuerpo crudo lleva texto de usuarios).",
+        "height": 330,
+        "width": 620,
+        "color": 5
+      },
+      "id": "26eca457-764e-5dd0-bc32-402c660b058c",
+      "name": "Notas webhook",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        80,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "multipleMethods": true,
+        "httpMethod": [
+          "GET",
+          "POST"
+        ],
+        "path": "instagram",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "2279f4fb-7f3f-57cc-82bf-837f236ba6da",
+      "name": "Webhook Instagram",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        220,
+        400
+      ],
+      "notes": "Sin cabecera de autenticación (Meta no puede). Salida 0 = GET, salida 1 = POST (el orden es el de httpMethod). rawBody deja los bytes exactos en el binario `data`.",
+      "webhookId": "f31540e7-f186-56bd-a529-36a29b3c5ce4"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Firma de los webhooks de Meta (Instagram) y verificación del GET de suscripción.\n//\n// Meta firma cada POST con la cabecera X-Hub-Signature-256: sha256=<hex>, que es\n// el HMAC-SHA256 del CUERPO TAL CUAL LLEGA (bytes crudos) con el App Secret.\n// Si se firma el JSON ya parseado y vuelto a serializar, la firma no coincide\n// (espacios, orden de claves, escapes é frente a é...). Por eso el nodo\n// Webhook tiene activado Raw Body y aquí se trabaja con Buffer.\n//\n// Funciona igual en Node (scripts/check.js) y dentro de un Code node de n8n:\n// el build quita la línea module.exports del final. require('crypto') solo\n// dentro de la función (en el runner hace falta NODE_FUNCTION_ALLOW_BUILTIN=crypto).\n// Ninguna función lanza excepciones: siempre devuelven {ok, reason}.\n\nconst SIGNATURE_PREFIX = 'sha256=';\nconst SIGNATURE_HEX_LENGTH = 64; // 32 bytes de SHA-256 en hexadecimal\n\nfunction toBuffer(value) {\n  if (value === undefined || value === null) return null;\n  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) return value;\n  if (value instanceof Uint8Array) return Buffer.from(value);\n  if (typeof value === 'string') return Buffer.from(value, 'utf8');\n  return null;\n}\n\n// header puede llegar como string o, en algunos proxies, como array.\nfunction readHeader(header) {\n  if (Array.isArray(header)) return header.length === 1 ? readHeader(header[0]) : null;\n  if (typeof header !== 'string') return null;\n  return header.trim();\n}\n\nfunction verifySignature(rawBody, header, appSecret) {\n  try {\n    if (typeof appSecret !== 'string' || appSecret.length === 0) return { ok: false, reason: 'missing_secret' };\n    const body = toBuffer(rawBody);\n    if (!body || body.length === 0) return { ok: false, reason: 'empty_body' };\n    const value = readHeader(header);\n    if (!value) return { ok: false, reason: 'missing_header' };\n    if (value.slice(0, SIGNATURE_PREFIX.length).toLowerCase() !== SIGNATURE_PREFIX) {\n      return { ok: false, reason: 'bad_prefix' };\n    }\n    const hex = value.slice(SIGNATURE_PREFIX.length).toLowerCase();\n    if (!/^[0-9a-f]+$/.test(hex)) return { ok: false, reason: 'malformed_header' };\n    if (hex.length !== SIGNATURE_HEX_LENGTH) return { ok: false, reason: 'bad_length' };\n\n    const crypto = require('crypto');\n    const expected = crypto.createHmac('sha256', appSecret).update(body).digest();\n    const received = Buffer.from(hex, 'hex');\n    // timingSafeEqual lanza si las longitudes son distintas: se comprueba antes.\n    if (received.length !== expected.length) return { ok: false, reason: 'bad_length' };\n    if (!crypto.timingSafeEqual(received, expected)) return { ok: false, reason: 'mismatch' };\n    return { ok: true };\n  } catch (error) {\n    return { ok: false, reason: 'error' };\n  }\n}\n\n// GET de verificación: ?hub.mode=subscribe&hub.challenge=123&hub.verify_token=...\n// n8n entrega la query con las claves tal cual (\"hub.mode\"); se acepta también\n// la forma anidada {hub: {mode, ...}} por si algún parser la convierte.\nfunction verifyChallenge(query, verifyToken) {\n  try {\n    if (!query || typeof query !== 'object') return { ok: false, reason: 'missing_query' };\n    const nested = query.hub && typeof query.hub === 'object' ? query.hub : {};\n    const pick = (key) => {\n      const value = query['hub.' + key] !== undefined ? query['hub.' + key] : nested[key];\n      return Array.isArray(value) ? value[0] : value;\n    };\n    const mode = pick('mode');\n    const token = pick('verify_token');\n    const challenge = pick('challenge');\n    if (typeof verifyToken !== 'string' || verifyToken.length === 0) return { ok: false, reason: 'missing_verify_token' };\n    // El valor de plantilla no puede verificar nunca: obliga a cambiarlo antes de conectar con Meta.\n    if (verifyToken === 'cambia-esto') return { ok: false, reason: 'placeholder_verify_token' };\n    if (mode !== 'subscribe') return { ok: false, reason: 'bad_mode' };\n    if (typeof token !== 'string' || token.length === 0) return { ok: false, reason: 'missing_token' };\n    if (challenge === undefined || challenge === null || String(challenge).length === 0) {\n      return { ok: false, reason: 'missing_challenge' };\n    }\n    const a = Buffer.from(token, 'utf8');\n    const b = Buffer.from(verifyToken, 'utf8');\n    const crypto = require('crypto');\n    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, reason: 'token_mismatch' };\n    return { ok: true, body: String(challenge) };\n  } catch (error) {\n    return { ok: false, reason: 'error' };\n  }\n}\n\n// El verify token se lee de Configuración sin ejecutarla (valor literal, no expresión).\nconst cfg = (($('Configuración').params.assignments || {}).assignments || []);\nconst token = (cfg.find((a) => a.name === 'verify_token') || {}).value;\nconst r = verifyChallenge($input.first().json.query, token);\nreturn [{ json: { ok: r.ok, reason: r.reason || null, challenge: r.body || '' } }];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "eacfafd8-54b8-5949-9ac9-929a4fac5c22",
+      "name": "Verificar GET",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        220
+      ],
+      "notes": "Responde el hub.challenge solo si el token coincide."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9d1567b7-47ee-5517-879a-cc4471e3dbcc",
+      "name": "¿GET ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        740,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.challenge }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "1dd0c4ff-6866-563d-948e-43095afaed63",
+      "name": "Devolver challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        980,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "noData",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "f36e9159-5bc4-5922-a4a4-18b6ebc39b93",
+      "name": "GET 403",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        980,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Bytes exactos que firmó Meta. No verifica: el secreto solo lo ve el runner de Python.\nconst item = $input.first();\nconst raw = await this.helpers.getBinaryDataBuffer(0, 'data');\nreturn [{ json: { raw_b64: raw.toString('base64'), signature: item.json.headers['x-hub-signature-256'] || '' } }];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "8dbb87e3-5b75-5852-b8f1-335dfe9645f1",
+      "name": "Cuerpo crudo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        560
+      ],
+      "notes": "Saca el cuerpo crudo en base64 y la cabecera X-Hub-Signature-256."
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# Verificación de X-Hub-Signature-256 en el runner de PYTHON de n8n.\n#\n# Por qué Python y no src/signature.js en el Code node: el App Secret vive como\n# variable IG_APP_SECRET del contenedor task-runners. El runner de Python la ve\n# con os.environ (N8N_BLOCK_RUNNER_ENV_ACCESS=false y IG_APP_SECRET en\n# allowed-env, como SMTP_* del ep3). El runner de JavaScript no tiene forma de\n# leer variables sin permitir el módulo 'process' a TODOS los Code nodes JS\n# (ver docs/spike-firma.md). src/signature.js hace lo mismo y es el que usan\n# las pruebas y el GET de verificación (que no necesita el secreto).\n#\n# Mismos motivos de rechazo que signature.js. No lanza excepciones.\n# Solo usa base64, hashlib, hmac y os (N8N_RUNNERS_STDLIB_ALLOW). Nada de\n# type(), getattr() ni __name__: el sandbox del runner los bloquea.\nimport base64\nimport hashlib\nimport hmac\nimport os\n\nSIGNATURE_PREFIX = \"sha256=\"\nHEX_DIGITS = \"0123456789abcdef\"\n\n\ndef verify_signature(raw, header, app_secret):\n    try:\n        if not isinstance(app_secret, str) or not app_secret:\n            return {\"ok\": False, \"reason\": \"missing_secret\"}\n        if isinstance(raw, str):\n            raw = raw.encode(\"utf-8\")\n        if not isinstance(raw, (bytes, bytearray)) or len(raw) == 0:\n            return {\"ok\": False, \"reason\": \"empty_body\"}\n        if isinstance(header, list):\n            header = header[0] if len(header) == 1 else None\n        if not isinstance(header, str) or not header.strip():\n            return {\"ok\": False, \"reason\": \"missing_header\"}\n        value = header.strip()\n        if value[: len(SIGNATURE_PREFIX)].lower() != SIGNATURE_PREFIX:\n            return {\"ok\": False, \"reason\": \"bad_prefix\"}\n        received = value[len(SIGNATURE_PREFIX):].lower()\n        if not received or any(c not in HEX_DIGITS for c in received):\n            return {\"ok\": False, \"reason\": \"malformed_header\"}\n        if len(received) != 64:\n            return {\"ok\": False, \"reason\": \"bad_length\"}\n        expected = hmac.new(app_secret.encode(\"utf-8\"), bytes(raw), hashlib.sha256).hexdigest()\n        if not hmac.compare_digest(expected, received):\n            return {\"ok\": False, \"reason\": \"mismatch\"}\n        return {\"ok\": True, \"reason\": None}\n    except Exception:\n        return {\"ok\": False, \"reason\": \"error\"}\n\n\ndef verify_item(item_json):\n    \"\"\"item_json = salida del Code node JS «Cuerpo crudo»: {raw_b64, signature}.\"\"\"\n    try:\n        raw = base64.b64decode(item_json.get(\"raw_b64\") or \"\", validate=True)\n    except Exception:\n        return {\"ok\": False, \"reason\": \"empty_body\"}\n    return verify_signature(raw, item_json.get(\"signature\"), os.environ.get(\"IG_APP_SECRET\", \"\"))\n\n\nreturn [{\"json\": verify_item(_items[0][\"json\"])}]\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "9223163a-deef-578b-85d4-10c9b86a30b0",
+      "name": "Verificar firma",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        560
+      ],
+      "notes": "HMAC-SHA256 del cuerpo crudo con IG_APP_SECRET (os.environ del runner de Python). Sin onError: si el runner falla no se responde 200 y Meta reintenta."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ffef0352-adfc-501a-aa4c-90fc9d380c72",
+      "name": "¿Firma ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "EVENT_RECEIVED",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "717d6b4a-bc43-58cf-95ed-308b152f26bd",
+      "name": "Responder 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1180,
+        500
+      ],
+      "notes": "Firma buena: se contesta ya y se sigue trabajando después."
+    },
+    {
+      "parameters": {
+        "respondWith": "noData",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "cf5fe9c9-07aa-589d-bd8c-73f6dc2bf00f",
+      "name": "Responder 403",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1180,
+        680
+      ],
+      "notes": "Firma mala: nada conectado detrás."
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "7efd6be8-e594-576b-9fa2-315068209eb2",
+              "name": "verify_token",
+              "value": "cambia-esto",
+              "type": "string"
+            },
+            {
+              "id": "d144bd2a-8dca-5487-b3a3-077a19ca1c73",
+              "name": "ig_account_id",
+              "value": "cambia-esto",
+              "type": "string"
+            },
+            {
+              "id": "50471d71-9745-5c78-baf1-afcd8b8b7f2c",
+              "name": "ig_username",
+              "value": "cambia-esto",
+              "type": "string"
+            },
+            {
+              "id": "8969e8c2-96aa-53e0-99e6-3f811d9327b0",
+              "name": "n8n_url",
+              "value": "http://localhost:5678",
+              "type": "string"
+            },
+            {
+              "id": "c4d14efa-84a8-54d4-913c-f742a9949630",
+              "name": "telegram_chat_id",
+              "value": "cambia-esto",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "73b5a6eb-2f52-59b3-ae51-b4b0657265ac",
+      "name": "Configuración",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1420,
+        500
+      ],
+      "notes": "Valores que se ven en cámara. El .env no entra aquí: Coolify bloquea $env. Los secretos NO van aquí."
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Normaliza el cuerpo de un webhook de Instagram en eventos propios.\n// Acepta las dos formas del comentario:\n//   - Unified Login:   entry[].changes[].value.comment_id\n//   - Instagram Login: entry[].changes[].value.id\n// y los mensajes en entry[].messaging[]. Llegan lotes con varias entries.\n// Lo que no sirve se descarta con un motivo fijo (EVENT_DROP_REASONS) para\n// poder contarlo y no perderlo en silencio. Sin I/O: no toca red ni base de datos.\n//\n// parseWebhook(payload, { igAccountId, igUsername, now? }) -> { events, dropped }\n//   Event   = { kind: 'comment' | 'dm', id, igAccountId, from: { id, username? },\n//               text, mediaId?, ts }\n//   dropped = [{ reason, ref }]   ref = comment_id / mid / campo, para el registro\n\nconst EVENT_DROP_REASONS = ['echo', 'own_comment', 'own_message', 'read', 'reaction', 'postback', 'message_edit', 'unsupported_field', 'no_text', 'reply_to_reply', 'malformed'];\n\nfunction evIsObject(value) {\n  return value !== null && typeof value === 'object' && !Array.isArray(value);\n}\n\n// Los ids de Meta son cadenas, pero un número también vale. Vacío = ''.\nfunction evId(value) {\n  if (typeof value === 'string') return value.trim();\n  if (typeof value === 'number' && Number.isFinite(value)) return String(value);\n  return '';\n}\n\n// entry.time llega en segundos (comentarios) o en milisegundos (mensajes).\nfunction evIso(value, fallback) {\n  const number = Number(value);\n  if (value !== null && value !== '' && Number.isFinite(number) && number > 0) {\n    const date = new Date(number < 1e11 ? number * 1000 : number);\n    if (!Number.isNaN(date.getTime())) return date.toISOString();\n  }\n  if (typeof value === 'string' && value && Number.isNaN(number)) {\n    const date = new Date(value);\n    if (!Number.isNaN(date.getTime())) return date.toISOString();\n  }\n  return fallback;\n}\n\nfunction evText(value) {\n  return typeof value === 'string' ? value : '';\n}\n\nfunction parseWebhook(payload, ctx) {\n  const options = evIsObject(ctx) ? ctx : {};\n  const events = [];\n  const dropped = [];\n  const drop = (reason, ref) => dropped.push({ reason, ref: ref === undefined || ref === null ? '' : String(ref) });\n  if (!evIsObject(payload) || !Array.isArray(payload.entry)) {\n    drop('malformed', '');\n    return { events, dropped };\n  }\n  const fallbackTs = evIso(options.now, new Date().toISOString());\n  const ctxAccount = evId(options.igAccountId);\n  const ownUsername = evText(options.igUsername).trim().replace(/^@/, '').toLowerCase();\n\n  for (const entry of payload.entry) {\n    if (!evIsObject(entry)) { drop('malformed', ''); continue; }\n    const entryId = evId(entry.id);\n    const account = entryId || ctxAccount;\n    const isOwnId = (id) => Boolean(id) && (id === entryId || id === ctxAccount);\n    const entryTs = evIso(entry.time, fallbackTs);\n\n    // Instagram Login a veces manda el cambio suelto en la entry (sin \"changes\").\n    const changes = Array.isArray(entry.changes) ? entry.changes\n      : (evIsObject(entry.value) && entry.field ? [{ field: entry.field, value: entry.value }] : []);\n    const messaging = Array.isArray(entry.messaging) ? entry.messaging : [];\n    if (!changes.length && !messaging.length) drop('unsupported_field', entryId);\n\n    for (const change of changes) {\n      if (!evIsObject(change)) { drop('malformed', ''); continue; }\n      if (change.field !== 'comments') { drop('unsupported_field', change.field); continue; }\n      const value = change.value;\n      if (!evIsObject(value)) { drop('malformed', 'comments'); continue; }\n      const commentId = evId(value.comment_id) || evId(value.id);\n      const from = evIsObject(value.from) ? value.from : {};\n      const fromId = evId(from.id);\n      if (!commentId || !fromId) { drop('malformed', commentId); continue; }\n      const username = evText(from.username).trim();\n      // Nuestras propias respuestas: por id de cuenta o por nombre de usuario.\n      if (isOwnId(fromId) || (ownUsername && username.toLowerCase() === ownUsername)) { drop('own_comment', commentId); continue; }\n      // Respuesta a otro comentario: se ignora (la privada y la pública cuelgan del de primer nivel).\n      if (evId(value.parent_id)) { drop('reply_to_reply', commentId); continue; }\n      const text = evText(value.text);\n      if (!text.trim()) { drop('no_text', commentId); continue; }\n      const event = { kind: 'comment', id: commentId, igAccountId: account, from: { id: fromId }, text, ts: entryTs };\n      if (username) event.from.username = username;\n      const mediaId = evId(evIsObject(value.media) ? value.media.id : '') || evId(value.media_id);\n      if (mediaId) event.mediaId = mediaId;\n      events.push(event);\n    }\n\n    for (const item of messaging) {\n      if (!evIsObject(item)) { drop('malformed', ''); continue; }\n      const message = evIsObject(item.message) ? item.message : null;\n      const sender = evId(evIsObject(item.sender) ? item.sender.id : '');\n      if (evIsObject(item.message_edit)) { drop('message_edit', evId(item.message_edit.mid)); continue; }\n      if (evIsObject(item.read)) { drop('read', evId(item.read.mid)); continue; }\n      if (evIsObject(item.reaction)) { drop('reaction', evId(item.reaction.mid)); continue; }\n      if (evIsObject(item.postback)) { drop('postback', evId(item.postback.mid)); continue; }\n      if (!message) { drop('unsupported_field', entryId); continue; }\n      const mid = evId(message.mid);\n      if (message.is_echo === true) { drop('echo', mid); continue; }\n      if (!sender || !mid) { drop('malformed', mid); continue; }\n      if (isOwnId(sender)) { drop('own_message', mid); continue; }\n      const text = evText(message.text);\n      // Borrados, adjuntos sueltos, stickers…: sin texto no hay nada que contestar.\n      if (message.is_deleted === true || !text.trim()) { drop('no_text', mid); continue; }\n      events.push({ kind: 'dm', id: mid, igAccountId: account, from: { id: sender }, text, ts: evIso(item.timestamp, entryTs) });\n    }\n  }\n  return { events, dropped };\n}\n\nconst cfg = $('Configuración').first().json;\nlet body = $('Webhook Instagram').first().json.body;\nif (typeof body === 'string') {\n  try { body = JSON.parse(body); } catch (error) { body = null; }\n}\nconst result = parseWebhook(body, { igAccountId: cfg.ig_account_id, igUsername: cfg.ig_username });\n// Lecturas y reacciones llegan a montones y no aportan nada: ni se registran.\nconst SILENT = ['read', 'reaction'];\nconst groups = {};\nfor (const item of result.dropped) {\n  if (SILENT.includes(item.reason)) continue;\n  const group = groups[item.reason] || (groups[item.reason] = { reason: item.reason, total: 0, refs: [] });\n  group.total += 1;\n  if (group.refs.length < 5 && item.ref) group.refs.push(String(item.ref));\n}\nreturn [{ json: { events: result.events, dropped: Object.values(groups), dropped_total: result.dropped.length } }];\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "24b2f48c-8647-5d5e-858a-9b6d53079fcb",
+      "name": "Normalizar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1660,
+        500
+      ],
+      "notes": "Un lote puede traer varios eventos. Los descartes salen agrupados por motivo (sin texto de usuarios)."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ig_actions (action, detail)\nSELECT 'descartado', jsonb_build_object('reason', d.reason, 'total', d.total, 'refs', d.refs)\nFROM jsonb_to_recordset($1::jsonb) AS d(reason text, total integer, refs jsonb)\nRETURNING id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [JSON.stringify($json.dropped)] }}"
+        }
+      },
+      "id": "188e3994-9745-5c70-a98d-ae8068cdaf9b",
+      "name": "Descartes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1900,
+        700
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Un solo INSERT por lote, una fila por motivo. Si falla no frena el despacho (onError continuar).",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return ($input.first().json.events || []).map((event) => ({ json: event }));\n",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "a0f24558-4950-5cac-96ed-8bfc75735709",
+      "name": "Separar eventos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        420
+      ],
+      "notes": "Un item por evento. Si el lote no trae eventos útiles, aquí se acaba."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO ig_events (event_id, kind)\n  VALUES ($1::text, $2::text)\n  ON CONFLICT (event_id) DO NOTHING\n  RETURNING event_id\n)\nSELECT (SELECT event_id FROM ins) AS inserted_id, $3::jsonb AS event",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.id, $json.kind, JSON.stringify($json)] }}"
+        }
+      },
+      "id": "1bade111-07de-54ca-a846-41f5bbfe8363",
+      "name": "Deduplicar",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2140,
+        420
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Meta reintenta hasta 36 h y los anuncios duplican comentarios. Si ya estaba, inserted_id es null. Devuelve el evento para no depender del emparejado de items.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = typeof $json.event === 'string' ? JSON.parse($json.event) : $json.event;\nreturn { json: { event, duplicate: !$json.inserted_id } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "c0594cea-0d49-5316-9772-b46ee1d81e1e",
+      "name": "Con evento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2380,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.duplicate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "603023df-1a65-506b-ac19-80de400639dc",
+      "name": "¿Duplicado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2600,
+        420
+      ],
+      "notes": "Sí: se anota y se acaba. No: se despacha."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ig_actions (action, detail)\nVALUES ('evento_duplicado', jsonb_build_object('event_id', $1::text, 'kind', $2::text))\nRETURNING id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.event.id, $json.event.kind] }}"
+        }
+      },
+      "id": "60054647-361e-5721-9d28-d0fc39134d07",
+      "name": "Anotar duplicado",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2840,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Auditoría del reintento de Meta. No vuelve a procesar nada.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.event.kind }}",
+              "rightValue": "comment",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "80085434-8a88-512a-9af0-2632fb8fbda8",
+      "name": "¿Comentario?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2840,
+        520
+      ],
+      "notes": "comment va a IG 02; dm va a IG 03."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuración').first().json.n8n_url.replace(/\\/$/, '') + '/webhook/ig-comment' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.event) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "dc91b0cc-bdbc-54a6-b997-e8b9885285d3",
+      "name": "Despachar comentario",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3080,
+        440
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "Llama a IG 02 con el evento normalizado. IG 02 responde al instante.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuración').first().json.n8n_url.replace(/\\/$/, '') + '/webhook/ig-dm' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.event) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "845ddfb1-1c21-5c56-acaa-04fd349cad0c",
+      "name": "Despachar mensaje",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3080,
+        620
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Instagram API Key"
+        }
+      },
+      "notes": "Llama a IG 03 con el evento normalizado.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "'use strict';\n\n// Textos que salen a Telegram. Todo lo que viene de Instagram (usuario, comentario,\n// mensaje, borrador) se escapa: el mensaje va con parse_mode HTML.\n// Forma de todos los avisos (la misma que en el agente de correo): emoji y título\n// en negrita, campos \"Etiqueta: valor\" uno por línea, bloques separados por una\n// línea en blanco, el texto largo en una cita.\n\n// Telegram corta en 4096. Los avisos se quedan en 3600 para que quepa la línea\n// de resultado que se añade al pulsar un botón (withResult).\nconst TELEGRAM_MAX = 4096;\nconst MESSAGE_MAX = 3600;\n\nfunction escapeHtml(value) {\n  return String(value ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\n// Recorta sin dejar medio emoji (un surrogate suelto lo rechaza Telegram).\nfunction cut(value, max) {\n  const text = String(value ?? '');\n  if (text.length <= max) return text;\n  let end = Math.max(0, max);\n  const code = text.charCodeAt(end - 1);\n  if (code >= 0xD800 && code <= 0xDBFF) end -= 1;\n  return text.slice(0, end);\n}\n\nfunction quote(text) {\n  return `<blockquote>${text}</blockquote>`;\n}\n\n// parts: líneas ya escapadas y, como mucho, un bloque largo\n// { raw, limit, render(textoEscapado, recortado) }. Si no cabe, se recorta solo\n// ese bloque. Cabecera y pie salen siempre enteros.\nfunction fit(parts, max = MESSAGE_MAX) {\n  const long = parts.find((part) => typeof part !== 'string');\n  const render = (raw, trimmed) => parts\n    .map((part) => (typeof part === 'string' ? part : part.render(escapeHtml(raw), trimmed)))\n    .join('\\n');\n  if (!long) return render('', false);\n  let raw = String(long.raw ?? '');\n  let trimmed = false;\n  if (long.limit && raw.length > long.limit) {\n    raw = cut(raw, long.limit).trimEnd() + ' […]';\n    trimmed = true;\n  }\n  const full = render(raw, trimmed);\n  if (full.length <= max) return full;\n  let keep = raw.length - (full.length - max) - 20;\n  while (keep > 0) {\n    const out = render(cut(raw, keep).trimEnd() + ' […]', true);\n    if (out.length <= max) return out;\n    keep -= Math.max(10, out.length - max);\n  }\n  return render('[…]', true);\n}\n\n// Hora de Madrid sin depender de ICU: UTC+1, y UTC+2 desde el último domingo\n// de marzo hasta el último de octubre (a la 01:00 UTC, regla de la UE).\nfunction lastSundayUtc(year, month) {\n  const last = new Date(Date.UTC(year, month + 1, 0));\n  return last.getUTCDate() - last.getUTCDay();\n}\n\nfunction madridLocal(date) {\n  const when = new Date(date === undefined ? Date.now() : date);\n  const year = when.getUTCFullYear();\n  const summerStart = Date.UTC(year, 2, lastSundayUtc(year, 2), 1);\n  const summerEnd = Date.UTC(year, 9, lastSundayUtc(year, 9), 1);\n  const offset = when.getTime() >= summerStart && when.getTime() < summerEnd ? 2 : 1;\n  return new Date(when.getTime() + offset * 3600000);\n}\n\nfunction pad2(value) {\n  return String(value).padStart(2, '0');\n}\n\nfunction madridTime(date) {\n  const local = madridLocal(date);\n  return pad2(local.getUTCHours()) + ':' + pad2(local.getUTCMinutes());\n}\n\n// \"10/11 18:30\", hora de Madrid. Para las ventanas, que cruzan de día.\nfunction madridStamp(date) {\n  const local = madridLocal(date);\n  return `${pad2(local.getUTCDate())}/${pad2(local.getUTCMonth() + 1)} ${madridTime(date)}`;\n}\n\nfunction validDate(value) {\n  if (value === undefined || value === null || value === '') return null;\n  const date = new Date(value);\n  return Number.isNaN(date.getTime()) ? null : date;\n}\n\n// \"@usuario_demo\" si lo conocemos; si no, el IGSID (en comentarios y mensajes\n// sin nombre de usuario). Nunca queda vacío.\nfunction userLine(row) {\n  const username = String(row.username || '').trim().replace(/^@/, '');\n  const igsid = String(row.igsid || '').trim();\n  if (username) return `Usuario: @${escapeHtml(cut(username, 80))}${igsid ? ` (<code>${escapeHtml(cut(igsid, 40))}</code>)` : ''}`;\n  return `Usuario: ${igsid ? `<code>${escapeHtml(cut(igsid, 40))}</code>` : '(desconocido)'}`;\n}\n\n// Lo que escribió el usuario. En ig_messages se guarda en text_normalized.\nfunction userText(row) {\n  return String(row.text ?? row.text_normalized ?? '').trim();\n}\n\nconst CATEGORY_LABELS = {\n  consulta_frecuente: 'consulta frecuente',\n  revision: 'revisión',\n  fuera_de_tema: 'fuera de tema',\n  sensible: 'tema sensible',\n};\n\nfunction categoryLabel(category) {\n  return CATEGORY_LABELS[category] || String(category || 'sin categoría').replace(/_/g, ' ');\n}\n\nfunction formatSources(sources) {\n  const list = Array.isArray(sources) ? sources.slice(0, 3) : [];\n  if (!list.length) return 'Sin fragmentos en la base de conocimiento.';\n  return list.map((source) => {\n    const title = cut(String(source.title || 'Documento'), 120);\n    const when = source.updated_at ? ` (${String(source.updated_at).slice(0, 10)})` : '';\n    const url = cut(String(source.canonical_url || source.url || ''), 200);\n    return `• ${title}${when}${url ? `\\n  ${url}` : ''}`;\n  }).join('\\n');\n}\n\nfunction loopHoldText(row) {\n  const minutes = Number(row && row.loop_minutes);\n  const span = Number.isFinite(minutes) && minutes > 0 ? `hace menos de ${minutes} min` : 'hace poco';\n  return `Retenido por el freno anti-bucles: a este usuario ya se le contestó automáticamente ${span}. Revísalo antes de enviar.`;\n}\nconst SENSITIVE_TEXT = 'Tema sensible: habla de precio, plazo, devolución o datos personales. Hace falta una persona.';\nconst WINDOW_RULE_TEXT = 'Instagram solo deja contestar dentro de las 24 h siguientes al último mensaje del usuario.';\n\n// El título dice por qué está bloqueado. Mandan los motivos de decide.js\n// (ig_messages.reasons); si no llegan, el principio del razonamiento, que\n// decide.js escribe con estas mismas frases. Mismo orden de prioridad que decide.js.\nconst BLOCKED_TITLES = [\n  ['inyeccion', /^El mensaje intenta dar instrucciones/, 'Bloqueado: intenta dar órdenes'],\n  ['promesa', /^El borrador prometía/, 'Bloqueado: el borrador prometía dinero o plazos'],\n  ['fuga_prompt', /^El borrador repetía instrucciones internas/, 'Bloqueado: el borrador repetía instrucciones internas'],\n  ['enlace_ajeno', /^El borrador traía un enlace/, 'Bloqueado: el borrador traía un enlace o un contacto ajeno'],\n  ['fuente_sospechosa', /^Una fuente de la base de conocimiento/, 'Bloqueado: fuente sospechosa en la base de conocimiento'],\n];\n\nfunction reasonList(value) {\n  let list = value;\n  if (typeof list === 'string') {\n    try { list = JSON.parse(list); } catch { list = []; }\n  }\n  return Array.isArray(list) ? list.map((item) => String(item)) : [];\n}\n\nfunction blockedTitle(reasoning, reasons) {\n  const codes = reasonList(reasons);\n  const byCode = BLOCKED_TITLES.find(([code]) => codes.includes(code));\n  if (byCode) return byCode[2];\n  const text = String(reasoning || '').trim();\n  const byText = BLOCKED_TITLES.find(([, regex]) => regex.test(text));\n  return byText ? byText[2] : 'Bloqueado: revísalo antes de contestar';\n}\n\n// Motivos por los que no salió solo. labels: el mapa REASONS de decide.js\n// (código → frase). Sin mapa, salen los códigos.\nfunction reasonsBlock(reasons, labels) {\n  const codes = reasonList(reasons);\n  if (!codes.length) return [];\n  const map = labels && typeof labels === 'object' ? labels : {};\n  return ['', '<b>Motivos</b>', ...codes.slice(0, 8).map((code) => `• ${escapeHtml(cut(String(map[code] || code), 200))}`)];\n}\n\n// Línea de la ventana de 24 h. Con \"now\" avisa si ya se cerró.\nfunction windowLine(row, now) {\n  const expires = validDate(row.window_expires_at);\n  if (!expires) return '';\n  if (now !== undefined && now !== null) {\n    const current = validDate(now);\n    if (current && expires.getTime() <= current.getTime()) return `⌛ La ventana de 24 h se cerró el ${madridStamp(expires)}: ya no se podrá enviar.`;\n  }\n  return `⏳ Ventana de 24 h: se cierra el ${madridStamp(expires)} (hora de Madrid).`;\n}\n\n// Fila de ig_messages -> campos de approvalMessage. La usan el flujo 05 al mandar\n// el aviso y el 04/06 al rehacerlo para quitarle los botones: sale igual.\nfunction approvalFromRow(row) {\n  let sources = Array.isArray(row.sources) ? row.sources : row.rag_sources;\n  if (typeof sources === 'string') {\n    try { sources = JSON.parse(sources); } catch { sources = []; }\n  }\n  return {\n    username: row.username,\n    igsid: row.igsid,\n    text: row.text,\n    text_normalized: row.text_normalized,\n    category: row.category,\n    confidence: row.confidence,\n    draft_reply: row.draft_reply,\n    reasoning: row.reasoning,\n    window_expires_at: row.window_expires_at,\n    loop_minutes: row.loop_minutes,\n    reasons: reasonList(row.reasons),\n    reason_labels: row.reason_labels,\n    sources: Array.isArray(sources) ? sources : [],\n    injection: row.injection === true || row.injection_flag === true,\n    sensitive: row.sensitive === true || row.sensitive_flag === true,\n    loop_hold: row.loop_hold === true,\n  };\n}\n\n// Acepta la fila de ig_messages tal cual (rag_sources, injection_flag…) o ya mapeada.\nfunction approvalMessage(input, now) {\n  const row = approvalFromRow(input || {});\n  const blocked = Boolean(row.injection);\n  const parts = blocked\n    ? [`🛑 <b>${blockedTitle(row.reasoning, row.reasons)}</b>`, userLine(row)]\n    : [\n      '📝 <b>Borrador para aprobar (Instagram)</b>',\n      userLine(row),\n      `Categoría: ${escapeHtml(categoryLabel(row.category))} · confianza ${Math.round(Number(row.confidence || 0) * 100)} %`,\n    ];\n  const window = windowLine(row, now);\n  if (window) parts.push(window);\n  const warnings = [];\n  // El flujo 04 no lo mandó solo: ese usuario ya recibió una respuesta automática hace poco.\n  if (row.loop_hold) warnings.push('🔁 ' + loopHoldText(row));\n  if (row.sensitive) warnings.push('⚠️ ' + SENSITIVE_TEXT);\n  if (warnings.length) parts.push('', ...warnings);\n  if (row.reasoning) parts.push('', `Por qué: ${escapeHtml(cut(String(row.reasoning).trim(), 300))}`);\n  parts.push(...reasonsBlock(row.reasons, row.reason_labels));\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 800));\n  if (!blocked) {\n    const draft = String(row.draft_reply || '').trim();\n    parts.push('', '<b>Borrador</b>');\n    parts.push(draft\n      ? { raw: draft, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortado para Telegram. El mensaje sale entero.</i>' : '') }\n      : '(vacío: escribe tú la respuesta con Editar)');\n  }\n  parts.push('', '<b>Fuentes</b>', escapeHtml(formatSources(row.sources)));\n  // Bloqueado = sin borrador. Lo que vea el usuario lo escribe una persona.\n  if (blocked) parts.push('', 'Sin borrador y sin botón Aprobar: escribe tú la respuesta con Editar, o Rechazar.');\n  return fit(parts);\n}\n\n// fit() admite un solo bloque largo. El texto del usuario va con este, recortado\n// a mano; el borrador o la respuesta es el bloque largo de cada aviso.\nfunction shortBlock(text, limit) {\n  const clean = String(text || '').trim();\n  return clean ? quote(escapeHtml(cut(clean, limit)) + (clean.length > limit ? ' […]' : '')) : '(sin texto)';\n}\n\n// Respuesta enviada. options.mode: 'auto' (el agente solo) o 'manual' (tú pulsaste\n// Aprobar o Editar). options.dryRun: no salió nada a Instagram.\nfunction sentNotice(row, options) {\n  const opts = options || {};\n  const auto = opts.mode === 'auto';\n  const parts = [\n    auto ? '🤖 <b>Respondido solo (Instagram)</b>' : '✅ <b>Respuesta enviada (Instagram)</b>',\n    userLine(row),\n    '',\n    '<b>Mensaje del usuario</b>',\n    shortBlock(userText(row), 600),\n    '',\n    auto ? '<b>Respuesta</b>' : '<b>Respuesta enviada</b>',\n  ];\n  const reply = String(row.final_reply || row.draft_reply || '').trim();\n  parts.push(reply\n    ? { raw: reply, limit: 1000, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortada para Telegram. Salió entera.</i>' : '') }\n    : '(sin texto)');\n  if (opts.dryRun) parts.push('', '🧪 Simulado (DRY_RUN): no se envió nada a Instagram.');\n  return fit(parts);\n}\n\n// No se envió porque pasaron 24 h desde el mensaje del usuario.\nfunction windowClosedNotice(row) {\n  const parts = ['⌛ <b>No se envió: la ventana de 24 h ya se cerró</b>', userLine(row)];\n  const expires = validDate(row.window_expires_at);\n  if (expires) parts.push(`La ventana se cerró el ${madridStamp(expires)} (hora de Madrid).`);\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 500));\n  const draft = String(row.final_reply || row.draft_reply || '').trim();\n  if (draft) parts.push('', '<b>Respuesta que no salió</b>', { raw: draft, limit: 800, render: (text, trimmed) => quote(text) + (trimmed ? '\\n<i>Recortada para Telegram.</i>' : '') });\n  parts.push('', WINDOW_RULE_TEXT + ' Si todavía merece la pena, contéstale tú desde la app de Instagram.');\n  return fit(parts);\n}\n\n// Retenido por el freno anti-bucles: pasa a aprobación en vez de salir solo.\nfunction heldNotice(row) {\n  const parts = ['🔁 <b>Retenido por el freno anti-bucles</b>', userLine(row), '', loopHoldText(row)];\n  const window = windowLine(row);\n  if (window) parts.push(window);\n  parts.push('', '<b>Mensaje del usuario</b>', shortBlock(userText(row), 500));\n  return fit(parts);\n}\n\nconst COMMENT_ERROR_HINTS = {\n  rate_limit: 'Es un límite de Meta. Se reintenta solo, cada vez más espaciado, mientras el comentario tenga menos de 7 días.',\n  window_closed: 'La ventana para contestar se cerró. No se reintenta.',\n  invalid_comment: 'Meta no acepta ese comentario para respuesta privada (ya tenía una, pasaron 7 días o no es válido). No se reintenta.',\n  permission: 'Falta un permiso o la cuenta tiene desactivado el acceso a mensajes. Revisa la app de Meta.',\n  token: 'El token de Meta ya no vale. Genera uno nuevo y actualiza la credencial «Instagram Token».',\n  not_found: 'Meta no encuentra ese ID o el token no lo ve. Revisa el ID de la cuenta y los permisos.',\n  blocked: 'Esa persona no está disponible o te ha bloqueado. No se reintenta.',\n  transient: 'Error temporal de Meta. Se reintenta solo.',\n};\n\n// Un comentario que no se pudo contestar. error: lo que devuelve classifyError\n// (o un texto suelto). row: { comment_id, username, igsid, text, keyword, attempts, id }.\nfunction commentErrorNotice(row, error) {\n  const detail = error && typeof error === 'object' ? error : { message: error };\n  const parts = ['⚠️ <b>Error con un comentario</b>', userLine(row)];\n  if (row.keyword) parts.push(`Palabra clave: ${escapeHtml(cut(String(row.keyword), 80))}`);\n  if (row.comment_id) parts.push(`Comentario: <code>${escapeHtml(cut(String(row.comment_id), 60))}</code>`);\n  if (row.attempts) parts.push(`Intentos: ${escapeHtml(String(row.attempts))}`);\n  parts.push('', shortBlock(row.text, 300));\n  const codes = detail.code ? ` (código ${escapeHtml(String(detail.code))}${detail.subcode ? `/${escapeHtml(String(detail.subcode))}` : ''})` : '';\n  parts.push('', `Error${codes}: <code>${escapeHtml(cut(String(detail.message || 'sin detalle').replace(/\\s+/g, ' ').trim(), 400))}</code>`);\n  const hint = COMMENT_ERROR_HINTS[detail.kind];\n  if (hint) parts.push('', `<b>Qué hacer:</b> ${escapeHtml(hint)}`);\n  return fit(parts);\n}\n\n// Aviso genérico de fallo. Corto y sin el texto del usuario.\nfunction failureMessage(what, row, error) {\n  const parts = [`⚠️ <b>Fallo: ${escapeHtml(cut(String(what), 200))}</b>`];\n  if (row && (row.username || row.igsid)) parts.push(userLine(row));\n  if (row && row.id) parts.push(`Fila: <code>${escapeHtml(row.id)}</code>`);\n  parts.push(`Error: <code>${escapeHtml(cut(String(error || 'sin detalle'), 500))}</code>`);\n  if (row && row.hint) parts.push('', `<b>Qué hacer:</b> ${escapeHtml(cut(String(row.hint), 1200))}`);\n  return fit(parts);\n}\n\nconst SEND_FAILURE_HINT = 'Queda en error_envio. Reintentar lo manda otra vez (tu texto si lo editaste), siempre que la ventana de 24 h siga abierta. Si nadie pulsa, vence como una aprobación.';\n\nfunction sendFailureMessage(row, error) {\n  return failureMessage('no se pudo enviar el mensaje', { ...row, hint: SEND_FAILURE_HINT }, error);\n}\n\n// Resumen diario. Secciones; las líneas a 0 no salen, salvo las importantes.\n// counts (los rellena la consulta del flujo 07; ausentes = 0):\n//   keyword_comments   comentarios con palabra clave\n//   private_sent       respuestas privadas enviadas\n//   auto_replied       mensajes contestados solos\n//   approved           mensajes aprobados por ti (Aprobar o Editar)\n//   rejected           rechazados por ti\n//   expired_approvals  aprobaciones vencidas\n//   expired_windows    ventanas de 24 h vencidas (no se envió)\n//   blocked_injection  bloqueados por inyección\n//   blocked_sensitive  retenidos por tema sensible\n//   blocked_loop       retenidos por el freno anti-bucles\n//   errors             con error\n//   waiting            esperando aprobación\n//   stuck              atascados más de 1 h\n//   purged             borrados por retención\nfunction summaryMessage(counts) {\n  const data = counts || {};\n  const n = (key) => (Number.isFinite(Number(data[key])) ? Math.max(0, Math.trunc(Number(data[key]))) : 0);\n  const section = (title, rows) => {\n    const shown = rows.filter(([, value, always]) => always || value > 0);\n    return shown.length ? ['', `<b>${title}</b>`, ...shown.map(([label, value]) => `${label}: ${value}`)] : [];\n  };\n  const expired = n('expired_approvals') + n('expired_windows');\n  const blocked = n('blocked_injection') + n('blocked_sensitive') + n('blocked_loop');\n  const blockedDetail = [\n    n('blocked_injection') ? `${n('blocked_injection')} inyección` : '',\n    n('blocked_sensitive') ? `${n('blocked_sensitive')} sensibles` : '',\n    n('blocked_loop') ? `${n('blocked_loop')} bucle` : '',\n  ].filter(Boolean).join(', ');\n  const expiredDetail = [\n    n('expired_approvals') ? `${n('expired_approvals')} aprobaciones` : '',\n    n('expired_windows') ? `${n('expired_windows')} ventanas de 24 h` : '',\n  ].filter(Boolean).join(', ');\n  const lines = [\n    '📊 <b>Resumen de ayer · Instagram</b>',\n    ...section('Comentarios', [\n      ['Con palabra clave', n('keyword_comments')],\n      ['Privados enviados', n('private_sent')],\n    ]),\n    ...section('Mensajes directos', [\n      ['Contestados solos', n('auto_replied')],\n      ['Aprobados por ti', n('approved')],\n      ['Rechazados por ti', n('rejected')],\n    ]),\n    ...section('Pendiente de ti', [\n      ['Esperando aprobación', n('waiting'), true],\n    ]),\n    ...section('Sin enviar', [\n      [`Vencidos${expiredDetail ? ` (${expiredDetail})` : ''}`, expired],\n      [`Bloqueados${blockedDetail ? ` (${blockedDetail})` : ''}`, blocked],\n    ]),\n    ...section('Problemas', [\n      ['Con error (míralos)', n('errors'), true],\n      ['Atascados más de 1 h', n('stuck')],\n    ]),\n  ];\n  if (n('purged')) lines.push('', `Borrados por retención: ${n('purged')}`);\n  const plural = (value, one, many) => `${value} ${value === 1 ? one : many}`;\n  const todo = [\n    n('waiting') ? `${n('waiting')} por aprobar` : '',\n    n('errors') ? `${n('errors')} con error` : '',\n    n('stuck') ? plural(n('stuck'), 'atascado', 'atascados') : '',\n    expired ? plural(expired, 'vencido', 'vencidos') : '',\n  ].filter(Boolean);\n  lines.push('', todo.length ? `👉 Te toca: ${todo.join(', ')}.` : '✅ Nada pendiente de ti.');\n  return lines.join('\\n');\n}\n\n// Línea que se añade al mensaje con botones cuando se decide. telegram.js dice\n// qué pasó (la clave); aquí está cómo se lee.\nconst RESULTS = {\n  enviando: '⏳ Aprobado. Enviando…',\n  enviado: '✅ Aprobado y enviado',\n  enviado_editado: '✅ Enviado con tu texto',\n  rechazado: '❌ Rechazado',\n  editando: '✏️ Editando: escribe en este chat el texto que se enviará',\n  fallo_envio: '⚠️ Falló el envío',\n  fallo_04: '⚠️ Falló el envío: el flujo IG 04 no recibió la petición',\n  ya_respondido: '✅ Ya estaba respondido. No se envía otra vez.',\n  ya_rechazado: '❌ Ya estaba rechazado. No se envía nada.',\n  vencido: '⌛ Venció el plazo de aprobación. No se envía nada.',\n  vencido_ventana: '⌛ No se envió: la ventana de 24 h ya se cerró',\n  retenido: '🔁 Retenido por el freno anti-bucles y aún sin pasar a aprobación. Este botón no envía nada.',\n  sin_fila: 'ℹ️ Este mensaje ya no corresponde a ningún mensaje de Instagram.',\n  otro: 'ℹ️ Este botón ya no hace nada.',\n};\nconst RESULT_TAILS = {\n  fallo_envio: 'Tienes Reintentar en el aviso de abajo.',\n  fallo_04: 'Pulsa Aprobar otra vez cuando esté.',\n};\n\nfunction resultLine(kind, options = {}) {\n  let line = RESULTS[kind] || RESULTS.otro;\n  if (options.detail) line += ': ' + escapeHtml(cut(String(options.detail).replace(/\\s+/g, ' ').trim(), 200));\n  if (options.when) line += ' · ' + options.when;\n  const tail = options.tail || RESULT_TAILS[kind];\n  return tail ? `${line}. ${tail}` : line;\n}\n\nfunction withResult(base, line) {\n  return cut(`${base}\\n\\n${line}`, TELEGRAM_MAX);\n}\n\n// Un botón de un mensaje que ya no tiene fila: se rehace con el texto plano que\n// trae el propio botón (Telegram lo manda sin formato).\nfunction plainMessage(text) {\n  return escapeHtml(cut(String(text || '').trim(), 3000));\n}\n\n// Ayuda que manda IG 06 al pulsar Editar. Con una sola edición abierta vale\n// cualquier texto del chat; con varias, hay que responder citando este mensaje.\nfunction editHelpMessage(row) {\n  const parts = ['✏️ <b>Escribe la respuesta</b>', userLine(row || {})];\n  const window = windowLine(row || {});\n  if (window) parts.push(window);\n  parts.push(\n    '',\n    'Manda en este chat el texto exacto que recibirá por DM (máx. 1000 bytes: cada tilde o ñ cuenta 2 y cada emoji 4).',\n    'Si tienes varias ediciones abiertas, responde citando este mensaje.',\n  );\n  return fit(parts);\n}\n\nconst info = $('Con evento').item.json.event;\nconst config = $('Configuración').first().json;\nconst raw = $json.error;\nconst detail = String(typeof raw === 'string' ? raw : (raw && (raw.message || raw.description)) || JSON.stringify(raw || 'sin detalle')).slice(0, 400);\nconst target = info.kind === 'comment' ? 'IG 02 - Comentarios (/webhook/ig-comment)' : 'IG 03 - Mensajes (/webhook/ig-dm)';\nconst hint = `Meta ya recibió el 200, así que no lo reenvía. ¿Está activo ${target}? ¿Coinciden n8n_url y la credencial Instagram API Key? El evento queda guardado en ig_actions (error_despacho) y su fila de ig_events se borra para poder reenviarlo a mano.`;\nconst chat = String(config.telegram_chat_id || '').trim();\nreturn { json: {\n  event_id: info.id,\n  kind: info.kind,\n  failure: detail,\n  event_json: JSON.stringify(info),\n  chat_id: chat,\n  notify: chat !== '' && chat !== 'cambia-esto',\n  text: failureMessage('no se pudo pasar un evento de Instagram a su flujo', { id: info.id, hint }, detail),\n} };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "ec73d673-b3c7-5721-bf90-796ece318b32",
+      "name": "Fallo despacho",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3320,
+        540
+      ],
+      "notes": "El texto de Telegram no lleva el comentario ni el mensaje del usuario."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH del AS (\n  DELETE FROM ig_events WHERE event_id = $1::text RETURNING event_id\n)\nINSERT INTO ig_actions (action, detail)\nVALUES ('error_despacho', jsonb_build_object('event_id', $1::text, 'kind', $2::text, 'failure', $3::text, 'event', $4::jsonb))\nRETURNING id",
+        "options": {
+          "queryBatching": "independently",
+          "queryReplacement": "={{ [$json.event_id, $json.kind, $json.failure, $json.event_json] }}"
+        }
+      },
+      "id": "6b9b5db1-fdf6-525b-9725-1161f30163f4",
+      "name": "Anotar fallo despacho",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3560,
+        540
+      ],
+      "credentials": {
+        "postgres": {
+          "id": null,
+          "name": "PostgreSQL"
+        }
+      },
+      "notes": "Único sitio donde se guarda el texto del evento: sin él no se podría recuperar. Se purga con el resto de ig_actions (90 días).",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Fallo despacho').item.json.notify }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e8af0ae3-93d1-5143-9254-f11406239768",
+      "name": "¿Avisar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3800,
+        540
+      ],
+      "notes": "Solo si telegram_chat_id ya no es «cambia-esto»."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Fallo despacho').item.json.chat_id }}",
+        "text": "={{ $('Fallo despacho').item.json.text }}",
+        "replyMarkup": "none",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false,
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "29c244b0-f1f0-5a58-8496-a7c583ded168",
+      "name": "Avisar fallo",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4040,
+        540
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": null,
+          "name": "Telegram Instagram"
+        }
+      },
+      "notes": "Bot de Instagram (credencial Telegram Instagram).",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook Instagram": {
+      "main": [
+        [
+          {
+            "node": "Verificar GET",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cuerpo crudo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar GET": {
+      "main": [
+        [
+          {
+            "node": "¿GET ok?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿GET ok?": {
+      "main": [
+        [
+          {
+            "node": "Devolver challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "GET 403",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cuerpo crudo": {
+      "main": [
+        [
+          {
+            "node": "Verificar firma",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar firma": {
+      "main": [
+        [
+          {
+            "node": "¿Firma ok?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Firma ok?": {
+      "main": [
+        [
+          {
+            "node": "Responder 200",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder 403",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder 200": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuración": {
+      "main": [
+        [
+          {
+            "node": "Normalizar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar": {
+      "main": [
+        [
+          {
+            "node": "Separar eventos",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Descartes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Separar eventos": {
+      "main": [
+        [
+          {
+            "node": "Deduplicar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicar": {
+      "main": [
+        [
+          {
+            "node": "Con evento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Con evento": {
+      "main": [
+        [
+          {
+            "node": "¿Duplicado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Duplicado?": {
+      "main": [
+        [
+          {
+            "node": "Anotar duplicado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Comentario?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Comentario?": {
+      "main": [
+        [
+          {
+            "node": "Despachar comentario",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Despachar mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Despachar comentario": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallo despacho",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Despachar mensaje": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallo despacho",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallo despacho": {
+      "main": [
+        [
+          {
+            "node": "Anotar fallo despacho",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anotar fallo despacho": {
+      "main": [
+        [
+          {
+            "node": "¿Avisar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Avisar?": {
+      "main": [
+        [
+          {
+            "node": "Avisar fallo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false
+  },
+  "pinData": {}
+}

@@ -1,0 +1,25 @@
+{
+  "object": "instagram",
+  "entry": [
+    {
+      "id": "17841400000000001",
+      "time": 1762700100000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "17841400000000001"
+          },
+          "recipient": {
+            "id": "1234567890123456"
+          },
+          "timestamp": 1762700101000,
+          "message": {
+            "mid": "aWdfZAG1fakeecho0001",
+            "is_echo": true,
+            "text": "Abrimos de lunes a viernes de 9:00 a 18:00."
+          }
+        }
+      ]
+    }
+  ]
+}

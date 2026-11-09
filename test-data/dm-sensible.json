@@ -1,0 +1,24 @@
+{
+  "object": "instagram",
+  "entry": [
+    {
+      "id": "17841400000000001",
+      "time": 1762700100000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "1234567890123456"
+          },
+          "recipient": {
+            "id": "17841400000000001"
+          },
+          "timestamp": 1762700099000,
+          "message": {
+            "mid": "aWdfZAG1fakesensible0001",
+            "text": "¿Cuánto cuesta el curso y puedo pedir una devolución?"
+          }
+        }
+      ]
+    }
+  ]
+}

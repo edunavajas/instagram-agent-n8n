@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Los nueve flujos del agente de Instagram</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&family=Noto+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@400&family=Noto+Sans+TC:wght@400;500;600&family=Noto+Serif+TC:wght@400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #f5f5f5;   /* white-smoke */
+      --color-ink:     #2d3142;   /* jet-black */
+      --color-muted:   #4f5d75;   /* blue-slate */
+      --color-accent:  #bf4520;   /* burnt-tangerine */
+      --font-sans:     'Geist', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', 'Noto Serif', 'Noto Serif KR', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+
+    .frame { max-width: 1280px; width: 100%; }
+    /* The SVG holds its readable width (min-width == the viewBox width, so the
+       type ramp is never silently scaled down). This wrapper lets a narrow
+       screen scroll the diagram instead of the whole page. */
+    .diagram-container { width: 100%; overflow-x: auto; }
+
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+
+    svg { width: 100%; min-width: 1280px; display: block; }
+    /* Paper has no scrollbar, so the local scroller would clip instead of
+       scroll. Let the diagram scale down to the sheet: smaller but whole
+       beats sharp but cut off. Must come after the svg rule above - a media
+       query adds no specificity, so a later plain rule would win. */
+    @media print {
+      .diagram-container { overflow-x: visible; }
+      svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Arquitectura · Diagram Design</p>
+    <h1>Los nueve flujos del agente de Instagram</h1>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="arquitectura-title arquitectura-desc">
+      <title id="arquitectura-title">Los nueve flujos del agente de Instagram</title>
+      <desc id="arquitectura-desc">Meta envía webhooks firmados a IG 01, que reparte comentarios a IG 02 y mensajes a IG 03; las respuestas salen por IG 04 e IG 08, y los borradores dudosos pasan por IG 05, Telegram e IG 06.</desc>
+        <defs>
+          <pattern id="dots-arquitectura" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.9" fill="rgba(45,49,66,0.10)"/></pattern>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+        <rect width="100%" height="100%" fill="url(#dots-arquitectura)" opacity="0.55"/>
+        <!-- Zona: aprobación humana -->
+        <rect x="420" y="472" width="660" height="124" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <rect x="716" y="466" width="108" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="770" y="475" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">APROBACIÓN HUMANA</text>
+        <!-- Flechas primero (detrás de las cajas) -->
+        <line x1="150" y1="261" x2="240" y2="261" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <path d="M 380,249 H 402 Q 410,249 410,241 V 154 Q 410,146 418,146 H 440" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 380,273 H 402 Q 410,273 410,281 V 368 Q 410,376 418,376 H 440" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="610" y1="146" x2="920" y2="146" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="1060" y1="146" x2="1130" y2="146" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <line x1="610" y1="376" x2="690" y2="376" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="525" y1="412" x2="525" y2="500" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 850,364 H 952 Q 960,364 960,356 V 182" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="610" y1="536" x2="690" y2="536" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="850" y1="536" x2="920" y2="536" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 1000,500 V 396 Q 1000,388 992,388 H 850" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 310,572 V 596 Q 310,604 318,604 H 762 Q 770,604 770,596 V 572" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+        <!-- Etiquetas de flecha -->
+        <rect x="170" y="241" width="50" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="195" y="250" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">FIRMADO</text>
+        <rect x="737" y="126" width="56" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="765" y="135" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RESPONDE</text>
+        <rect x="1065" y="126" width="61" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="1095" y="135" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GRAPH API</text>
+        <rect x="633" y="356" width="34" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="650" y="365" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AUTO</text>
+        <rect x="533" y="450" width="56" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="561" y="459" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">BORRADOR</text>
+        <rect x="968" y="264" width="56" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="996" y="273" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ENVÍA DM</text>
+        <rect x="630" y="516" width="39" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="650" y="525" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AVISO</text>
+        <rect x="865" y="516" width="39" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="885" y="525" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">BOTÓN</text>
+        <rect x="896" y="394" width="50" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="921" y="403" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">APRUEBA</text>
+        <rect x="481" y="608" width="88" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="525" y="617" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RESUMEN DIARIO</text>
+        <!-- Nodos -->
+        <!-- Meta -->
+        <rect x="40" y="201" width="110" height="120" rx="6" fill="#f5f5f5"/>
+        <rect x="40" y="201" width="110" height="120" rx="6" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+        <rect x="48" y="209" width="30" height="12" rx="2" fill="transparent" stroke="rgba(90,101,128,0.40)" stroke-width="0.8"/>
+        <text x="63" y="218" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+        <text x="95" y="253" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Meta</text>
+        <text x="95" y="269" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">comentarios</text>
+        <text x="95" y="282" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">y mensajes</text>
+        <!-- IG 01 · Webhook -->
+        <rect x="240" y="225" width="140" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="240" y="225" width="140" height="72" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <rect x="248" y="233" width="35" height="12" rx="2" fill="transparent" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+        <text x="265" y="242" fill="#bf4520" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">HOOK</text>
+        <text x="310" y="261" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IG 01 · Webhook</text>
+        <text x="310" y="277" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">verifica firma · 200</text>
+        <!-- IG 02 · Comentarios -->
+        <rect x="440" y="110" width="170" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="440" y="110" width="170" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="448" y="118" width="40" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="468" y="127" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">REGLA</text>
+        <text x="525" y="146" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IG 02 · Comentarios</text>
+        <text x="525" y="162" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">palabra clave · sin IA</text>
+        <text x="525" y="174" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">+ 02b reintentos</text>
+        <!-- IG 03 · Mensajes -->
+        <rect x="440" y="340" width="170" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="440" y="340" width="170" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="448" y="348" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="460" y="357" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">IA</text>
+        <text x="525" y="376" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IG 03 · Mensajes</text>
+        <text x="525" y="392" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">RAG · modelo · decide</text>
+        <text x="525" y="404" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">inyección y sensibles</text>
+        <!-- IG 04 · Enviar -->
+        <rect x="690" y="340" width="160" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="690" y="340" width="160" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="698" y="348" width="35" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="715" y="357" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SEND</text>
+        <text x="770" y="376" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IG 04 · Enviar</text>
+        <text x="770" y="392" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ventana 24 h · freno</text>
+        <text x="770" y="404" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">recorta a 1000 bytes</text>
+        <!-- IG 08 · Graph API -->
+        <rect x="920" y="110" width="140" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="920" y="110" width="140" height="72" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <rect x="928" y="118" width="30" height="12" rx="2" fill="transparent" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+        <text x="943" y="127" fill="#bf4520" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+        <text x="990" y="146" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IG 08 · Graph API</text>
+        <text x="990" y="162" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">el único con Meta</text>
+        <text x="990" y="174" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">DRY_RUN aquí</text>
+        <!-- Meta -->
+        <rect x="1130" y="110" width="110" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="1130" y="110" width="110" height="72" rx="6" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+        <rect x="1138" y="118" width="30" height="12" rx="2" fill="transparent" stroke="rgba(90,101,128,0.40)" stroke-width="0.8"/>
+        <text x="1153" y="127" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+        <text x="1185" y="146" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Meta</text>
+        <text x="1185" y="162" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Graph API v27.0</text>
+        <!-- IG 05 · Aprobación -->
+        <rect x="440" y="500" width="170" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="440" y="500" width="170" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="448" y="508" width="30" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="463" y="517" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ASK</text>
+        <text x="525" y="536" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IG 05 · Aprobación</text>
+        <text x="525" y="552" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">borrador a Telegram</text>
+        <!-- Telegram -->
+        <rect x="690" y="500" width="160" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="690" y="500" width="160" height="72" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="698" y="508" width="30" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+        <text x="713" y="517" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+        <text x="770" y="536" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Telegram</text>
+        <text x="770" y="552" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">bot propio del ep. 4</text>
+        <!-- IG 06 · Botones -->
+        <rect x="920" y="500" width="140" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="920" y="500" width="140" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="928" y="508" width="30" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="943" y="517" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">BTN</text>
+        <text x="990" y="536" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IG 06 · Botones</text>
+        <text x="990" y="552" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">los 3 botones</text>
+        <!-- IG 07 · Resumen -->
+        <rect x="240" y="500" width="140" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="240" y="500" width="140" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="248" y="508" width="35" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="265" y="517" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CRON</text>
+        <text x="310" y="536" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">IG 07 · Resumen</text>
+        <text x="310" y="552" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">cada día · 06:05 UTC</text>
+        <text x="310" y="564" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">purga 90 días</text>
+        <!-- Callout -->
+        <line x1="1086" y1="246" x2="1086" y2="334" stroke="rgba(45,49,66,0.10)" stroke-width="1.2"/>
+        <text x="1098" y="262" fill="#4f5d75" font-size="14" font-style="italic" font-family="'Instrument Serif', serif">Todo el estado vive en</text>
+        <text x="1098" y="280" fill="#4f5d75" font-size="14" font-style="italic" font-family="'Instrument Serif', serif">Postgres: cada paso es</text>
+        <text x="1098" y="298" fill="#4f5d75" font-size="14" font-style="italic" font-family="'Instrument Serif', serif">un UPDATE … WHERE</text>
+        <text x="1098" y="316" fill="#4f5d75" font-size="14" font-style="italic" font-family="'Instrument Serif', serif">status = 'anterior'.</text>
+        <text x="1098" y="334" fill="#4f5d75" font-size="14" font-style="italic" font-family="'Instrument Serif', serif">Sin nodos Wait.</text>
+        <!-- Leyenda -->
+        <line x1="40" y1="648" x2="1240" y2="648" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <text x="40" y="664" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.18em">LEYENDA</text>
+        <rect x="40" y="676" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <text x="60" y="684" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Único contacto con Meta (entra / sale)</text>
+        <rect x="260.79999999999995" y="676" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="280.79999999999995" y="684" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Flujo de n8n</text>
+        <rect x="361.99999999999994" y="676" width="14" height="10" rx="2" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+        <text x="381.99999999999994" y="684" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Meta</text>
+        <rect x="426.3999999999999" y="676" width="14" height="10" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="446.3999999999999" y="684" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Telegram</text>
+        <line x1="509.19999999999993" y1="681" x2="537.1999999999999" y2="681" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <text x="545.1999999999999" y="684" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">HTTPS con Meta</text>
+        <line x1="635.5999999999999" y1="681" x2="663.5999999999999" y2="681" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <text x="671.5999999999999" y="684" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Pasa al siguiente flujo</text>
+        <line x1="803.3999999999999" y1="681" x2="831.3999999999999" y2="681" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+        <text x="839.3999999999999" y="684" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Programado (cron)</text>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>

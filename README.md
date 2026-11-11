@@ -29,29 +29,20 @@ Estado de este documento: la parte de Meta está escrita a partir de la document
 
 Todos llevan el prefijo `IG ` para no chocar con los del episodio 3 («01 - Ingesta»…).
 
-```
-Meta ── GET (verificación) / POST (notificación firmada) ──► IG 01 Webhook
-                       verifica la firma sobre el cuerpo crudo (403 si no cuadra), responde 200,
-                       normaliza, descarta lo propio, deduplica (ig_events)
-                                   │
-          ┌── comentario ──────────┴────────── mensaje directo ──┐
-          ▼                                                       ▼
-   IG 02 Comentarios                                       IG 03 Mensajes
-   palabra clave → privada + pública                       filtros · RAG · modelo · decide
-          │   ▲                                                   │
-          │   └── IG 02b Reintentos (cada 5 min)         ┌── auto ┴── aprobación ──┐
-          │                                              ▼                         ▼
-          │                                       IG 04 Enviar            IG 05 Pedir aprobación ──► Telegram
-          │                                        │   ▲                              │
-          │                                        │   │ Aprobar / Editar (otra ejecución)
-          │                                        │   └──────── IG 06 Botones ◄──────┘
-          │                                        │  freno anti-bucles ─► IG 05
-          ▼                                        ▼
-      IG 08 Graph API  ◄───────────────────────────┘      (el único que habla con Meta)
-          │
-          ▼
-        Meta                     IG 07 Resumen (cada día, 06:05 UTC): vence, purga 90 días, resumen a Telegram
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagramas/arquitectura-dark.png">
+  <img alt="Meta envía webhooks firmados a IG 01, que reparte los comentarios a IG 02 y los mensajes a IG 03. IG 03 envía solo a IG 04 o pide aprobación a IG 05, que avisa por Telegram; IG 06 recoge los botones y llama a IG 04. IG 02 e IG 04 hablan con Meta únicamente a través de IG 08. IG 07 manda el resumen diario a Telegram." src="docs/diagramas/arquitectura.png">
+</picture>
+
+Lo que hace cada flecha, por si el dibujo se queda corto:
+
+- **IG 01** verifica la firma sobre el cuerpo crudo (403 si no cuadra), responde 200, normaliza, descarta lo propio y deduplica en `ig_events`.
+- **IG 02** (con **IG 02b** cada 5 minutos para los reintentos) responde por palabra clave: privada y después pública, sin IA.
+- **IG 03** filtra, consulta el RAG, clasifica con el modelo y decide: respuesta automática (**IG 04**) o aprobación (**IG 05**).
+- **IG 04** comprueba la ventana de 24 h y el freno anti-bucles; si el freno salta, el mensaje vuelve a **IG 05**.
+- **IG 08** es el único flujo que habla con Meta; **IG 07** vence, purga a 90 días y manda el resumen.
+
+El dibujo está hecho con [diagram-design](https://github.com/cathrynlavery/diagram-design) (fuente HTML y SVG en [`docs/diagramas/`](docs/diagramas/)).
 
 | Fichero | Qué hace | Disparo |
 |---|---|---|
@@ -695,6 +686,7 @@ scripts/
   checks/                      pruebas por módulo, y sql_dm.py (SQL contra un PostgreSQL de verdad)
   send-fake-webhook.sh         webhooks falsos firmados
 docs/spike-firma.md          el spike de la firma en n8n 2.10.2: pruebas, medidas y gotchas
+docs/diagramas/              diagrama de arquitectura (HTML fuente, SVG y PNG, claro y oscuro)
 LICENSE
 ```
 
